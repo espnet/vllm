@@ -794,6 +794,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
     ),
     "BagelForConditionalGeneration": _HfExamplesInfo("ByteDance-Seed/BAGEL-7B-MoT"),
+    "BagpiperForConditionalGeneration": _HfExamplesInfo(
+        "bagpiper",
+        max_model_len=4096,
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "BeeForConditionalGeneration": _HfExamplesInfo(
         "Open-Bee/Bee-8B-RL",
         trust_remote_code=True,
@@ -1269,6 +1275,18 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "openvla/openvla-7b",
         trust_remote_code=True,
     ),
+    "OpusLMForConditionalGeneration": _HfExamplesInfo(
+        "OpusLM",
+        max_model_len=4096,
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
+    "OpusLMDialogueForConditionalGeneration": _HfExamplesInfo(
+        "OpusLM_dialogue",
+        max_model_len=4096,
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "Ovis": _HfExamplesInfo(
         "AIDC-AI/Ovis2-1B",
         trust_remote_code=True,
@@ -1409,6 +1427,13 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "SmolVLMForConditionalGeneration": _HfExamplesInfo(
         "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+    ),
+    # Legacy alias: Bagpiper was formerly named SpeechLM.
+    "SpeechLMForConditionalGeneration": _HfExamplesInfo(
+        "bagpiper",
+        max_model_len=4096,
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "Step3VLForConditionalGeneration": _HfExamplesInfo(
         "stepfun-ai/step3",

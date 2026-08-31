@@ -49,6 +49,8 @@ _VLLM_TOKENIZERS = {
     "kimi_audio": ("kimi_audio", "KimiAudioTokenizer"),
     "kimi_k3": ("hf", "CachedHfTokenizer"),
     "mistral": ("mistral", "MistralTokenizer"),
+    "opuslm": ("opuslm", "OpusLMTokenizer"),
+    "opuslm_dialogue": ("opuslm_dialogue", "OpusLMDialogueTokenizer"),
     # Inkling uses the plain HF tokenizer for token operations; the "inkling"
     # mode exists to select the InklingRenderer, which renders chat to
     # token ids natively (Inkling has no Jinja chat template).
@@ -102,6 +104,7 @@ def resolve_tokenizer_args(
     *args,
     runner_type: "RunnerType" = "generate",
     tokenizer_mode: str = "auto",
+    model_type: str | None = None,
     **kwargs,
 ):
     revision: str | None = kwargs.get("revision")
@@ -145,6 +148,13 @@ def resolve_tokenizer_args(
         tokenizer_mode = "hf"
         kwargs["use_fast"] = False
 
+    # OpusLM uses a shifted global vocabulary layout:
+    # tokenizer IDs are mapped to [text_token_start, text_token_end) at runtime.
+    if tokenizer_mode == "auto" and model_type == "opuslm":
+        tokenizer_mode = "opuslm"
+    if tokenizer_mode == "auto" and model_type == "opuslm_dialogue":
+        tokenizer_mode = "opuslm_dialogue"
+
     # Try to use official Mistral tokenizer if possible
     if (
         tokenizer_mode == "auto"
@@ -169,11 +179,53 @@ def resolve_tokenizer_args(
 cached_resolve_tokenizer_args = lru_cache(resolve_tokenizer_args)
 
 
+def _inject_opuslm_tokenizer_kwargs(hf_config, kwargs: dict) -> dict:
+    """Fill OpusLM tokenizer kwargs from the model's hf_config.
+
+    OpusLMTokenizer.from_pretrained pops these ``opuslm_*``-prefixed kwargs to
+    configure the global-vocab shift. Note that this only covers the base
+    ``opuslm`` model type: the dialogue tokenizer reads ``opuslm_dialogue_*``
+    kwargs, which are deliberately never injected here — its hardcoded
+    defaults match the shipped checkpoint (known limitation kept as-is).
+    """
+    kwargs = dict(kwargs)
+    kwargs.setdefault(
+        "opuslm_text_token_offset",
+        int(getattr(hf_config, "text_token_start", 13448)),
+    )
+    kwargs.setdefault(
+        "opuslm_text_token_end",
+        int(getattr(hf_config, "text_token_end", 113800)),
+    )
+    kwargs.setdefault(
+        "opuslm_pad_token_id",
+        int(getattr(hf_config, "pad_token_id", 0)),
+    )
+    kwargs.setdefault(
+        "opuslm_eos_token_id",
+        int(getattr(hf_config, "eos_token_id", 5)),
+    )
+    kwargs.setdefault(
+        "opuslm_codec_ssl_start_end_token_id",
+        int(getattr(hf_config, "codec_ssl_start_end_token_id", 34)),
+    )
+    kwargs.setdefault(
+        "opuslm_text_bpe_start_end_token_id",
+        int(getattr(hf_config, "text_bpe_start_end_token_id", 35)),
+    )
+    return kwargs
+
+
 def tokenizer_args_from_config(config: "ModelConfig", **kwargs):
+    model_type = getattr(config.hf_config, "model_type", None)
+    if model_type == "opuslm":
+        kwargs = _inject_opuslm_tokenizer_kwargs(config.hf_config, kwargs)
+
     return cached_resolve_tokenizer_args(
         config.tokenizer,
         runner_type=config.runner_type,
         tokenizer_mode=config.tokenizer_mode,
+        model_type=model_type,
         revision=config.tokenizer_revision,
         trust_remote_code=config.trust_remote_code,
         **kwargs,
@@ -272,6 +324,17 @@ def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
         return None
 
     _maybe_register_hf_config(getattr(model_config, "hf_config", None))
+
+    # OpusLM: this function is the path that actually constructs the
+    # tokenizer used by the engine and the renderer, so the model_type-based
+    # tokenizer_mode resolution and the config-driven kwargs must be applied
+    # here as well (resolve_tokenizer_args only sees what we pass down).
+    hf_config = getattr(model_config, "hf_config", None)
+    model_type = getattr(hf_config, "model_type", None)
+    if model_type == "opuslm":
+        kwargs = _inject_opuslm_tokenizer_kwargs(hf_config, kwargs)
+    if model_type in ("opuslm", "opuslm_dialogue"):
+        kwargs.setdefault("model_type", model_type)
 
     return cached_get_tokenizer(
         model_config.tokenizer,

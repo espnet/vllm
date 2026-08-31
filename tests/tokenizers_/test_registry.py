@@ -141,3 +141,16 @@ def test_cached_tokenizer_from_config_registers_local_config(tmp_path: Path):
         CONFIG_MAPPING._extra_content.pop("qwen3_5_moe", None)
         if registered_config is not None:
             CONFIG_MAPPING._extra_content["qwen3_5_moe"] = registered_config
+
+
+def test_resolve_tokenizer_args_opuslm_short_circuit():
+    tokenizer_mode, tokenizer_name, args, kwargs = resolve_tokenizer_args(
+        "dummy-tokenizer",
+        tokenizer_mode="auto",
+        model_type="opuslm",
+    )
+
+    assert tokenizer_mode == "opuslm"
+    assert tokenizer_name == "dummy-tokenizer"
+    assert args == ()
+    assert kwargs["truncation_side"] == "left"

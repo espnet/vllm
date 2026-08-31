@@ -352,6 +352,10 @@ _MULTIMODAL_MODELS = {
         "AudioFlamingo3ForConditionalGeneration",
     ),
     "BagelForConditionalGeneration": ("bagel", "BagelForConditionalGeneration"),
+    "BagpiperForConditionalGeneration": (
+        "bagpiper",
+        "BagpiperForConditionalGeneration",
+    ),
     "BeeForConditionalGeneration": ("bee", "BeeForConditionalGeneration"),
     "Blip2ForConditionalGeneration": ("blip2", "Blip2ForConditionalGeneration"),
     "ChameleonForConditionalGeneration": (
@@ -538,6 +542,14 @@ _MULTIMODAL_MODELS = {
         "OpenPanguVLForConditionalGeneration",
     ),
     "OpenVLAForActionPrediction": ("openvla", "OpenVLAForActionPrediction"),
+    "OpusLMForConditionalGeneration": (
+        "opuslm",
+        "OpusLMForConditionalGeneration",
+    ),
+    "OpusLMDialogueForConditionalGeneration": (
+        "opuslm_dialogue",
+        "OpusLMDialogueForConditionalGeneration",
+    ),
     "Ovis": ("ovis", "Ovis"),
     "Ovis2_5": ("ovis2_5", "Ovis2_5"),
     "Ovis2_6ForCausalLM": ("ovis2_5", "Ovis2_5"),
@@ -597,6 +609,11 @@ _MULTIMODAL_MODELS = {
     "RForConditionalGeneration": ("rvl", "RForConditionalGeneration"),
     "SkyworkR1VChatModel": ("skyworkr1v", "SkyworkR1VChatModel"),
     "SmolVLMForConditionalGeneration": ("smolvlm", "SmolVLMForConditionalGeneration"),
+    # Legacy alias: Bagpiper was formerly named SpeechLM.
+    "SpeechLMForConditionalGeneration": (
+        "bagpiper",
+        "BagpiperForConditionalGeneration",
+    ),
     "StepVLForConditionalGeneration": ("step_vl", "StepVLForConditionalGeneration"),
     "Step3VLForConditionalGeneration": ("step3_vl", "Step3VLForConditionalGeneration"),
     "Step3p7ForConditionalGeneration": ("step3p7", "Step3p7ForConditionalGeneration"),

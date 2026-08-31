@@ -27,6 +27,10 @@ _VLLM_RENDERERS = {
     "kimi_audio": ("hf", "HfRenderer"),
     "kimi_k3": ("kimi_k3", "KimiK3Renderer"),
     "mistral": ("mistral", "MistralRenderer"),
+    # OpusLM uses custom tokenizers (global-vocab shift) but the standard
+    # HF chat-template rendering.
+    "opuslm": ("hf", "HfRenderer"),
+    "opuslm_dialogue": ("hf", "HfRenderer"),
     "terratorch": ("terratorch", "TerratorchRenderer"),
     "inkling": ("inkling", "InklingRenderer"),
 }

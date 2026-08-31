@@ -129,6 +129,12 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     step3p5="Step3p5Config",
     qianfan_ocr="QianfanOCRConfig",
     qwen3_asr="Qwen3ASRConfig",
+    bagpiper="BagpiperConfig",
+    # Legacy alias: Bagpiper was formerly named SpeechLM; old checkpoints
+    # declare model_type "speechlm".
+    speechlm="BagpiperConfig",
+    opuslm="OpusLMConfig",
+    opuslm_dialogue="OpusLMDialogueConfig",
     qwen3_next="Qwen3NextConfig",
     qwen3_5="Qwen3_5Config",
     qwen3_5_text="Qwen3_5TextConfig",
