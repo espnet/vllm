@@ -1,0 +1,21 @@
+# ESPnet audio-LM examples
+
+Tooling for the ESPnet audio language models supported by this fork:
+**bagpiper** (Qwen3-8B backbone, text + audio generation with optional CFG),
+**opuslm** (OLMo-2-7B backbone, TTS / ASR / text-LM), and
+**opuslm_dialogue** (SmolLM2-1.7B backbone, spoken dialogue).
+
+Layout:
+
+- `convert/` — checkpoint converters (ESPnet / DeepSpeed → HF-style
+  safetensors directories ready for `vllm serve`).
+- `serve_bagpiper.sh`, `serve_opuslm.sh`, `serve_opuslm_dialogue.sh` —
+  server launch scripts (ports 9811 / 9812 / 9813 by default;
+  `MODEL_PATH` is required, extra args pass through to `vllm serve`).
+- `clients/` — reference clients for every supported task, plus a
+  stress-test client for bagpiper. See `clients/README.md`.
+- `docker/` — Dockerfile deriving from `vllm/vllm-openai:v0.28.0` with
+  this fork's Python code and the ESPnet runtime dependencies.
+
+Full documentation (Chinese): _placeholder — link to be added by the
+integrator._
