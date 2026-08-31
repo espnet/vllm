@@ -20,13 +20,34 @@
 #                      "audio_temperature": 0.8, "audio_topk": 30}
 #     }'
 #
-# NOTE: audio output requires espnet2 installed on the server (the DAC
-# decoder is lazy-loaded from HF on the first audio decode); audio input
-# additionally pulls the XEUS checkpoint and kmeans model from HF.
+# NOTE: audio output requires BOTH espnet and espnet_model_zoo on the
+# server. AudioCoding.from_pretrained() imports espnet_model_zoo.downloader
+# to resolve the DAC model tag, so espnet alone raises ModuleNotFoundError
+# on the first audio decode. espnet_model_zoo caches into its own package
+# directory, not the HF hub cache. Audio input additionally pulls the XEUS
+# checkpoint and kmeans model from HF (those do use the HF hub cache), and
+# needs joblib + scikit-learn to load the kmeans model.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+# Required: keep the V1 model runner. The audio hooks (per-stream sampling,
+# WAV egress) live in vllm/v1/worker/gpu_model_runner.py. v0.28.0 routes dense
+# models to the newer runner in vllm/v1/worker/gpu/model_runner.py by default,
+# which has none of them: the server would boot and emit text while silently
+# returning no audio, so fail loudly instead of serving a half-working model.
+if [[ "${VLLM_USE_V2_MODEL_RUNNER:-0}" != "0" ]]; then
+  echo "ERROR: VLLM_USE_V2_MODEL_RUNNER=${VLLM_USE_V2_MODEL_RUNNER} is unsupported." >&2
+  echo "       The audio hooks exist only in the V1 model runner." >&2
+  exit 1
+fi
+export VLLM_USE_V2_MODEL_RUNNER=0
+
+# Async scheduling defaults to ON in v0.28.0. ASYNC_SCHEDULING=0 (our default)
+# passes --no-async-scheduling, the configuration the audio path is verified
+# on; set ASYNC_SCHEDULING=1 to take the upstream default instead.
+ASYNC_SCHEDULING="${ASYNC_SCHEDULING:-0}"
 
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-9812}"
@@ -74,6 +95,13 @@ if [[ "${HAS_PORT_ARG}" -eq 0 ]]; then
   PORT_ARG=(--port "${PORT}")
 fi
 
+ASYNC_ARG=()
+if [[ "${ASYNC_SCHEDULING}" == "0" ]]; then
+  ASYNC_ARG=(--no-async-scheduling)
+fi
+
+echo "[serve_opuslm] VLLM_USE_V2_MODEL_RUNNER=0 ASYNC_SCHEDULING=${ASYNC_SCHEDULING}" >&2
+
 # max-model-len 8192 matches the checkpoint's max_position_embeddings.
 # `vllm serve` is the canonical entrypoint on v0.28.0.
 vllm serve "$MODEL_PATH" \
@@ -82,6 +110,7 @@ vllm serve "$MODEL_PATH" \
     --max-model-len 8192 \
     --host "$HOST" \
     "${PORT_ARG[@]}" \
+    "${ASYNC_ARG[@]}" \
     --gpu-memory-utilization 0.90 \
     --max-num-seqs 1024 \
     --tensor-parallel-size 1 \

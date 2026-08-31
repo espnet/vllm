@@ -1,0 +1,53 @@
+# Build-context filter for examples/espnet/docker/Dockerfile.
+#
+# BuildKit gives a Dockerfile-specific ignore-file precedence over the
+# repo-root .dockerignore, and it REPLACES it rather than merging, so the
+# upstream patterns are repeated here verbatim below the .git entry.
+#
+# .git is excluded on top of the upstream set: it is 270+ MB of the build
+# context and nothing in the build reads it. setup.py's only git consumer
+# is get_base_commit_in_main_branch(), which returns before any git call
+# when VLLM_DOCKER_BUILD_CONTEXT=1 and is not reached at all once
+# VLLM_PRECOMPILED_WHEEL_LOCATION pins the wheel; the package version
+# comes from SETUPTOOLS_SCM_PRETEND_VERSION.
+.git
+
+# ── Below: copied from the repo-root .dockerignore ────────────────────────
+/.venv
+/build
+/artifacts/vllm-rocm-install/
+/bake-config-build-*.json
+/wheel-export/
+dist
+vllm/*.so
+vllm/vllm-rs
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+.mypy_cache
+
+# Distribution / packaging
+.Python
+/build/
+cmake-build-*/
+CMakeUserPresets.json
+develop-eggs/
+/dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+rust/target/
