@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 import gc
 import os
 import queue
@@ -475,11 +476,66 @@ class EngineCore:
                 "Disabling ECTransfer for this request."
             )
 
+        cfg_scale = None
+        if request.sampling_params is not None and request.sampling_params.extra_args:
+            cfg_scale = request.sampling_params.extra_args.get("cfg")
+        if cfg_scale is not None and cfg_scale > 1:
+            # CFG: the model needs an unconditional branch alongside the real
+            # prompt, so run a second "shadow" request in lockstep. The model
+            # runner combines the two logit rows; only the main request's
+            # tokens are sampled and returned.
+            shadow = self._create_cfg_shadow(request)
+            request.cfg_shadow_id = shadow.request_id
+            shadow.cfg_main_id = request.request_id
+            cfg_group_id = f"cfg-{request.request_id}"
+            request.cfg_group_id = cfg_group_id
+            shadow.cfg_group_id = cfg_group_id
+            # The runner pairs the two rows through `extra_args`, since the
+            # request ids it sees are internal and randomized.
+            request.sampling_params.extra_args["cfg_group_id"] = cfg_group_id
+            shadow.sampling_params.extra_args["cfg_group_id"] = cfg_group_id
+            # Add the shadow FIRST: the scheduler admits the pair as a bundle
+            # keyed off the main request, and a main request admitted before
+            # its shadow exists would run a step without its partner.
+            self.scheduler.add_request(shadow)
+
         self.scheduler.add_request(request)
         if request.abort_immediately:
             # Immediately abort so the connector's request_finished hook runs
             # to free any pre-admission KV-transfer resources.
             self.abort_requests([request.request_id])
+
+    def _create_cfg_shadow(self, main: Request) -> Request:
+        """Build the unconditional half of a CFG pair.
+
+        The prompt is all-zero and the same length as the main prompt so both
+        halves stay position-aligned; the runner overwrites the shadow's input
+        tokens anyway. No multi-modal features: the unconditional branch is by
+        definition the one without the conditioning audio/image.
+        """
+        assert main.sampling_params is not None
+        shadow_sampling_params = copy.deepcopy(main.sampling_params)
+        if shadow_sampling_params.extra_args is None:
+            shadow_sampling_params.extra_args = {}
+        shadow_sampling_params.extra_args["is_shadow"] = True
+        # The runner overwrites the shadow's sampled tokens, so it needs no
+        # grammar of its own -- and keeping one would park it in
+        # WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR, where the scheduler could never
+        # bundle it with its main request.
+        shadow_sampling_params.structured_outputs = None
+        prompt_token_ids = main.prompt_token_ids or []
+        return Request(
+            request_id=f"{main.request_id}-shadow",
+            prompt_token_ids=[0] * len(prompt_token_ids),
+            sampling_params=shadow_sampling_params,
+            pooling_params=None,
+            client_index=main.client_index,
+            arrival_time=main.arrival_time,
+            mm_features=None,
+            lora_request=main.lora_request,
+            priority=main.priority,
+            block_hasher=self.request_block_hasher,
+        )
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
@@ -1512,7 +1568,15 @@ class EngineCoreProc(EngineCore):
             req, request_wave = request
             if self._reject_add_in_shutdown(req):
                 return
-            self.add_request(req, request_wave)
+            try:
+                self.add_request(req, request_wave)
+            except Exception:
+                # A request that cannot be admitted (e.g. a malformed CFG pair)
+                # must not take the engine down with it, and the client must
+                # not be left waiting forever for a request that was never
+                # scheduled.
+                logger.exception("Failed to add request %s", req.request_id)
+                self._send_error_outputs_to_client([req.request_id], req.client_index)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.UTILITY:

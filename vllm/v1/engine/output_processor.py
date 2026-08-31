@@ -182,6 +182,10 @@ class RequestState:
         self.routed_experts_chunks: list[np.ndarray] = []
         self.sampling_mask_chunks: list[SamplingMaskLists] = []
 
+        # Audio-output models: base64 WAV, arrives on the final engine
+        # core output only and is attached to the final CompletionOutput.
+        self.audio_output: str | None = None
+
         # Stream Interval
         self.stream_interval = stream_interval
         self.sent_tokens_offset = 0  # Offset of sent tokens
@@ -429,6 +433,7 @@ class RequestState:
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None,
+            audio_output=self.audio_output if finished else None,
         )
 
     def _new_pooling_output(self, pooling_output: torch.Tensor) -> PoolingOutput:
@@ -647,6 +652,8 @@ class OutputProcessor:
                 req_state.routed_experts_chunks.append(
                     engine_core_output.routed_experts
                 )
+            if engine_core_output.audio_output is not None:
+                req_state.audio_output = engine_core_output.audio_output
 
             if req_state.is_prefilling:
                 if engine_core_output.prefill_stats is not None:

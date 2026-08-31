@@ -359,6 +359,10 @@ class ModelRunnerOutput:
     # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None
 
+    # Audio-output models (bagpiper/opuslm): req_id -> base64 WAV audio,
+    # populated in the step where the request's audio generation finishes.
+    audio_outputs: dict[str, str] | None = None
+
     @staticmethod
     def with_kv_conn_output_only(
         kv_connector_output: KVConnectorOutput | None,

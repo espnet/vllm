@@ -1228,7 +1228,12 @@ class GPUModelRunner(
         req_state: CachedRequestState | None,
     ) -> None:
         """Hook for platform runners to clean request-scoped side caches."""
-        del req_id, req_state
+        del req_state
+        # Audio-output models keep per-request stream histories and configs
+        # that only the engine knows are dead.
+        audio_model = self._audio_output_model()
+        if audio_model is not None:
+            audio_model.cleanup_request(req_id)
 
     def _process_encoder_cache_scheduler_output(
         self,
@@ -1402,7 +1407,18 @@ class GPUModelRunner(
             self.prev_num_draft_tokens.np.fill(0)
 
         for i, req_id in enumerate(req_data.req_ids):
-            req_state = self.requests[req_id]
+            req_state = self.requests.get(req_id)
+            if req_state is None:
+                # CFG: the other half of a main/shadow pair can be freed via
+                # finished_req_ids in a step where the scheduler still had this
+                # one queued. Skip it without mutating scheduler_output, which
+                # is shared with the caller under multiprocessing.
+                logger.warning(
+                    "CFG: skipping cached req %s not found in "
+                    "model_runner.requests (likely freed in a prior step)",
+                    req_id,
+                )
+                continue
             num_computed_tokens = req_data.num_computed_tokens[i]
             new_block_ids = req_data.new_block_ids[i]
             resumed_from_preemption = req_id in req_data.resumed_req_ids
@@ -3610,6 +3626,383 @@ class GPUModelRunner(
         inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
         return input_ids, inputs_embeds
 
+    # ------------------------------------------------------------------
+    # Audio-output models (bagpiper / opuslm / opuslm_dialogue).
+    #
+    # Only one token per step (stream 0) goes through the vLLM KV cache;
+    # the remaining nq-1 codec streams are sampled inside the model and
+    # re-enter as a summed embedding. So the engine has to tell the model
+    # which requests make up the batch, drive the per-request text/audio
+    # phase machine from the sampled tokens (the model cannot do it on
+    # mixed prefill+decode steps, where input_ids is longer than the
+    # batch), and hand back the decoded WAV when a request finishes.
+    #
+    # The whole group is gated on the model exposing
+    # ``_current_batch_req_ids``, so any other model pays one ``hasattr``.
+    # ------------------------------------------------------------------
+
+    def _audio_output_model(self) -> nn.Module | None:
+        """The unwrapped model if it is an audio-output model, else None.
+
+        CUDAGraphWrapper / UBatchWrapper do not delegate ``__setattr__`` to the
+        wrapped module, so the hooks below must read and write the unwrapped
+        one.
+        """
+        model = getattr(self, "model", None)
+        model = getattr(model, "runnable", model)
+        return model if hasattr(model, "_current_batch_req_ids") else None
+
+    def _sync_audio_batch_state(
+        self,
+        model: nn.Module,
+        scheduler_output: "SchedulerOutput",
+    ) -> None:
+        """Publish the batch layout and per-request config to an audio model.
+
+        Must run before ``embed_input_ids``: the model maps token positions
+        back to requests through ``_current_batch_req_ids`` / ``_tokens_per_req``
+        while it builds the summed multi-stream embedding.
+        """
+        num_reqs = self.input_batch.num_reqs
+        req_ids = list(self.input_batch.req_ids[:num_reqs])
+        num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        model._current_batch_req_ids = req_ids
+        model._tokens_per_req = [num_scheduled_tokens.get(r, 1) for r in req_ids]
+
+        is_opuslm = hasattr(model, "_stream18_history")
+        for req_id in req_ids:
+            req_state = self.requests.get(req_id)
+            if req_state is None:
+                continue
+            params = req_state.sampling_params
+            extra_args = dict(params.extra_args) if params and params.extra_args else {}
+            if not is_opuslm:
+                # bagpiper: extra_args (mode / cfg / cfg_group_id / is_shadow)
+                # is the whole config, and the phase machine below defaults the
+                # phase to "text".
+                if extra_args and req_id not in model._per_req_config:
+                    model._per_req_config[req_id] = extra_args
+                continue
+            self._sync_opuslm_req_config(model, req_id, req_state, extra_args)
+
+        if is_opuslm:
+            model._prefill_stream_replay = self._build_opuslm_replay(
+                model, scheduler_output
+            )
+
+    def _sync_opuslm_req_config(
+        self,
+        model: nn.Module,
+        req_id: str,
+        req_state: CachedRequestState,
+        extra_args: dict[str, Any],
+    ) -> None:
+        """Seed and merge the mode / phase config of one opuslm request."""
+        modes = (
+            "text_audio",
+            "audio_text",
+            "text_text",
+            "audio_dialogue",
+            "text_dialogue",
+        )
+        phase_override = extra_args.pop("phase", None)
+        # Infer the mode from the input when the client did not ask for one:
+        # audio in means audio understanding, otherwise audio generation.
+        has_audio_input = any(
+            getattr(f, "modality", None) == "audio" for f in req_state.mm_features
+        )
+        requested_mode = extra_args.get("mode")
+        if requested_mode in modes:
+            default_mode = requested_mode
+        else:
+            default_mode = "audio_text" if has_audio_input else "text_audio"
+        # The audio-out tasks start decoding codec frames right away, the
+        # text-out tasks start in the text phase.
+        default_phase = (
+            "audio" if default_mode in ("text_audio", "audio_dialogue") else "text"
+        )
+
+        req_config = model._per_req_config.get(req_id)
+        if req_config is None:
+            req_config = {
+                "mode": default_mode,
+                "phase": default_phase,
+                "flush_remaining": 0,
+                "flush_step": 0,
+                "audio_step": 0,
+                "is_dialogue": default_mode in ("audio_dialogue", "text_dialogue"),
+            }
+            if isinstance(phase_override, str):
+                req_config["phase"] = phase_override
+            model._per_req_config[req_id] = req_config
+
+        # Merge client overrides without dropping the inferred defaults, and
+        # without letting them undo a phase transition made at runtime.
+        req_config.update(extra_args)
+        mode = req_config.get("mode", default_mode)
+        if mode not in modes:
+            mode = default_mode
+        if has_audio_input and mode == "text_text":
+            mode = "audio_text"
+        req_config["mode"] = mode
+        req_config.setdefault("phase", default_phase)
+        req_config.setdefault("flush_remaining", 0)
+        req_config.setdefault("flush_step", 0)
+        req_config.setdefault("audio_step", 0)
+        req_config.setdefault("text_step", 0)
+        config = model.config
+        req_config.setdefault("audio_minlen", int(getattr(config, "audio_minlen", 3)))
+        req_config.setdefault("text_minlen", int(getattr(config, "text_minlen", 1)))
+
+    def _build_opuslm_replay(
+        self,
+        model: nn.Module,
+        scheduler_output: "SchedulerOutput",
+    ) -> dict[int, torch.Tensor]:
+        """Stream history to replay for preempted audio requests re-prefilling.
+
+        While decoding, the embedding of an audio position was
+        emb(s0) + emb(s1) + ... + emb(s[nq-1]). A re-prefill only replays the
+        stream-0 ids, so the same positions would be embedded as
+        emb(s0) + (nq-1) * emb(pad) and the recomputed KV would no longer match
+        what the model generated. Feeding the stored history back fixes it.
+
+        Known limitation kept from the original fork: only opuslm_dialogue
+        reads ``_prefill_stream_replay``, so a preempted audio-phase request on
+        bagpiper or plain opuslm still degrades.
+        """
+        replay: dict[int, torch.Tensor] = {}
+        num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        marker = getattr(model.config, "codec_ssl_start_end_token_id", 34)
+        token_offset = 0
+        for req_index in range(self.input_batch.num_reqs):
+            req_id = self.input_batch.req_ids[req_index]
+            num_tokens = num_scheduled_tokens.get(req_id, 0)
+            history = model._stream18_history.get(req_id)
+            req_state = self.requests.get(req_id)
+            # More than one scheduled token means (re-)prefill, and a request
+            # that already has audio history was preempted mid-generation.
+            if history and num_tokens > 1 and req_state is not None:
+                num_computed = int(self.input_batch.num_computed_tokens_cpu[req_index])
+                marker_index = -1
+                for out_index, token_id in enumerate(req_state.output_token_ids):
+                    if token_id == marker:
+                        marker_index = out_index
+                        break
+                if marker_index >= 0:
+                    # Drop the last entry: compute_logits re-samples it during
+                    # the re-prefill. Keeping it would grow the history by one
+                    # and shift the de-interleaving for the codec decoder.
+                    history.pop()
+                    for hist_index, hist_entry in enumerate(history):
+                        # history[i] was sampled at step i but consumed as the
+                        # stream buffer at step i+1, hence the +2 (the marker
+                        # itself plus one step of delay).
+                        global_pos = (
+                            req_state.num_prompt_tokens + marker_index + 2 + hist_index
+                        )
+                        local_pos = global_pos - num_computed
+                        if 0 <= local_pos < num_tokens:
+                            replay[token_offset + local_pos] = hist_entry
+            token_offset += num_tokens
+        return replay
+
+    def _audio_sampled_tokens(
+        self,
+        sampled_token_ids: torch.Tensor,
+        valid_sampled_token_ids: list[list[int]],
+        invalid_req_indices: list[int],
+    ) -> list[int | None]:
+        """This step's last sampled token per batch row, None where discarded.
+
+        With async scheduling ``valid_sampled_token_ids`` is empty because the
+        tokens stay on the GPU, so the phase machine has to force a D2H copy.
+        It is done once for the whole column rather than once per request, and
+        only when an audio-output model is loaded.
+        """
+        if valid_sampled_token_ids:
+            return [ids[-1] if ids else None for ids in valid_sampled_token_ids]
+        if sampled_token_ids.numel() == 0:
+            return []
+        invalid = set(invalid_req_indices)
+        return [
+            None if i in invalid else int(token)
+            for i, token in enumerate(sampled_token_ids[:, 0].tolist())
+        ]
+
+    def _advance_audio_phases(
+        self,
+        model: nn.Module,
+        req_ids: list[str],
+        sampled_tokens: list[int | None],
+    ) -> None:
+        """Advance the per-request phase machine with this step's tokens."""
+        per_req_config = model._per_req_config
+        if hasattr(model, "_stream18_history"):
+            self._advance_opuslm_phases(model, req_ids, sampled_tokens)
+        elif hasattr(model, "_stream17_history"):
+            # bagpiper: text -> transition -> audio -> audio_stop, driven by
+            # eot. In audio_stop the model forces EOS on the next step.
+            eot_token_id = model.config.eot_token_id
+            for req_id, token in zip(req_ids, sampled_tokens):
+                if token is None:
+                    continue
+                req_config = per_req_config.get(req_id)
+                if (
+                    req_config is None
+                    or req_config.get("mode") != "text_audio"
+                    or req_config.get("is_shadow", False)
+                ):
+                    continue
+                phase = req_config.get("phase", "text")
+                if phase == "text" and token == eot_token_id:
+                    req_config["phase"] = "transition"
+                elif phase == "transition":
+                    req_config["phase"] = "audio"
+                elif phase == "audio" and token == eot_token_id:
+                    req_config["phase"] = "audio_stop"
+
+        # CFG: copy the main request's phase onto its shadow so both halves of
+        # the pair stay positionally aligned.
+        main_phase_by_group: dict[str, str] = {}
+        for req_config in per_req_config.values():
+            group_id = req_config.get("cfg_group_id")
+            if group_id and not req_config.get("is_shadow"):
+                main_phase_by_group[group_id] = req_config.get("phase", "text")
+        for req_config in per_req_config.values():
+            if req_config.get("is_shadow"):
+                phase = main_phase_by_group.get(req_config.get("cfg_group_id"))
+                if phase is not None:
+                    req_config["phase"] = phase
+
+    def _advance_opuslm_phases(
+        self,
+        model: nn.Module,
+        req_ids: list[str],
+        sampled_tokens: list[int | None],
+    ) -> None:
+        """opuslm phase machine.
+
+        Audio-out path: text -> [pre_audio] -> audio -> audio_flush (nq-1
+        steps) -> audio_stop, after which the model forces EOS. The text-out
+        modes stay in the text phase and stop on EOS; only text_step is
+        tracked there, for the minimum-length check inside the model.
+        """
+        config = model.config
+        model_is_dialogue = getattr(model, "_is_dialogue", False)
+        codec_marker_id = config.codec_ssl_start_end_token_id
+        text_bpe_id = config.text_bpe_start_end_token_id
+        eos_token_id = config.eos_token_id
+        nq = config.nq
+        for req_id, token in zip(req_ids, sampled_tokens):
+            if token is None:
+                continue
+            req_config = model._per_req_config.get(req_id)
+            if req_config is None:
+                continue
+            mode = req_config.get("mode", "text_audio")
+            if mode in ("audio_text", "text_text", "text_dialogue"):
+                req_config["text_step"] = int(req_config.get("text_step", 0)) + 1
+                continue
+
+            phase = req_config.get("phase", "text")
+            if phase == "text":
+                req_config["text_step"] = int(req_config.get("text_step", 0)) + 1
+                if token == codec_marker_id:
+                    req_config["phase"] = "audio"
+                    req_config["audio_step"] = 0
+                elif token == text_bpe_id and not req_config.get(
+                    "is_dialogue", model_is_dialogue
+                ):
+                    # Plain opuslm: token 35 announces the switch to codec
+                    # decoding, and pre_audio then forces 34. For a dialogue
+                    # model 35 is a modality marker used inside text
+                    # generation, so it must not switch.
+                    req_config["phase"] = "pre_audio"
+            elif phase == "pre_audio":
+                if token == codec_marker_id:
+                    req_config["phase"] = "audio"
+                    req_config["audio_step"] = 0
+            elif phase == "audio":
+                req_config["audio_step"] = int(req_config.get("audio_step", 0)) + 1
+                # ARDelay semantics: only EOS ends the codec segment.
+                if token == eos_token_id:
+                    req_config["phase"] = "audio_flush"
+                    req_config["flush_remaining"] = nq - 1
+                    req_config["flush_step"] = 1
+            elif phase == "audio_flush":
+                req_config["audio_step"] = int(req_config.get("audio_step", 0)) + 1
+                remaining = int(req_config.get("flush_remaining", 0)) - 1
+                req_config["flush_remaining"] = max(remaining, 0)
+                req_config["flush_step"] = int(req_config.get("flush_step", 1)) + 1
+                if remaining <= 0:
+                    req_config["phase"] = "audio_stop"
+            # audio_stop: the model forces EOS and vLLM stops the request.
+
+    def _collect_audio_outputs(
+        self,
+        model: nn.Module,
+        req_ids: list[str],
+        sampled_tokens: list[int | None],
+    ) -> dict[str, str] | None:
+        """Track stream-0 tokens and decode finished requests to base64 WAV.
+
+        ``encode_audio_to_base64_wav`` runs the codec decoder inline, so the
+        step that finishes a request pays the vocoder latency. That is how the
+        original fork works; there is no streaming audio.
+        """
+        audio_outputs: dict[str, str] | None = None
+        config = model.config
+        is_opuslm = hasattr(model, "_stream18_history")
+        for req_id, token in zip(req_ids, sampled_tokens):
+            if token is None:
+                continue
+            req_config = model._per_req_config.get(req_id)
+            # CFG: only the main request of a pair produces audio.
+            if req_config is None or req_config.get("is_shadow"):
+                continue
+            phase = req_config.get("phase")
+            if is_opuslm:
+                if req_config.get("mode") not in (
+                    "text_audio",
+                    "audio_dialogue",
+                ) or phase not in ("audio", "audio_flush", "audio_stop"):
+                    continue
+                # Keep every audio-phase stream-0 token, SSL or not: a stray
+                # non-SSL token still has to be counted, or stream0 and
+                # stream18 lose alignment for the de-interleaving.
+                if phase == "audio" and token != config.eos_token_id:
+                    model._stream0_history.setdefault(req_id, []).append(token)
+                should_decode = phase == "audio_stop" and token == config.eos_token_id
+            else:
+                if req_config.get("mode") != "text_audio" or phase not in (
+                    "audio",
+                    "audio_stop",
+                ):
+                    continue
+                if config.codec_base_offset <= token < config.vocab_size:
+                    model._stream0_history.setdefault(req_id, []).append(token)
+                # eot during audio becomes a forced EOS on the next step
+                # (audio_stop phase), so EOS is the only marker to check.
+                should_decode = token == config.eos_token_id
+            if not should_decode:
+                req_state = self.requests.get(req_id)
+                if req_state is not None and req_state.sampling_params is not None:
+                    max_tokens = req_state.sampling_params.max_tokens
+                    if max_tokens and len(req_state.output_token_ids) >= max_tokens:
+                        should_decode = True
+            if not should_decode:
+                continue
+            stream0 = model._stream0_history.pop(req_id, [])
+            if not stream0:
+                continue
+            wav_base64 = model.encode_audio_to_base64_wav(req_id, stream0)
+            if wav_base64:
+                if audio_outputs is None:
+                    audio_outputs = {}
+                audio_outputs[req_id] = wav_base64
+        return audio_outputs
+
     def _preprocess(
         self,
         scheduler_output: "SchedulerOutput",
@@ -3626,6 +4019,12 @@ class GPUModelRunner(
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         is_first_rank = get_pp_group().is_first_rank
         is_encoder_decoder = self.model_config.is_encoder_decoder
+
+        # Audio-output models need the batch layout and the per-request config
+        # before the embedding is built, and before the forward reads them.
+        audio_model = self._audio_output_model()
+        if audio_model is not None:
+            self._sync_audio_batch_state(audio_model, scheduler_output)
 
         # Clamp speculative scheduler placeholders (-1) before embedding lookup.
         if self.speculative_config is not None:
@@ -3888,6 +4287,44 @@ class GPUModelRunner(
                 for i, req_id in enumerate(self.input_batch.req_ids)
                 if i not in invalid_req_indices_set
             }
+
+        # CFG: force every shadow request onto the token its paired main
+        # request sampled, so the two stay positionally aligned. Pairing goes
+        # through cfg_group_id because vLLM assigns its own request ids and the
+        # client-supplied ids cannot be used to find the partner.
+        audio_model = self._audio_output_model()
+        if audio_model is not None:
+            per_req_config = audio_model._per_req_config
+            cfg_groups: dict[str, dict[str, int]] = {}
+            for i in range(num_sampled_tokens):
+                req_config = per_req_config.get(self.input_batch.req_ids[i], {})
+                group_id = req_config.get("cfg_group_id")
+                if group_id:
+                    role = "shadow" if req_config.get("is_shadow") else "main"
+                    cfg_groups.setdefault(group_id, {})[role] = i
+            for members in cfg_groups.values():
+                main_idx = members.get("main")
+                shadow_idx = members.get("shadow")
+                if main_idx is None or shadow_idx is None:
+                    continue
+                main_config = per_req_config.get(self.input_batch.req_ids[main_idx], {})
+                in_audio = main_config.get("phase", "text") in ("audio", "audio_stop")
+                if not self.use_async_scheduling:
+                    if not in_audio:
+                        # Text / transition: pad the shadow so it carries no
+                        # text context.
+                        valid_sampled_token_ids[shadow_idx] = [0]
+                    elif valid_sampled_token_ids[main_idx]:
+                        valid_sampled_token_ids[shadow_idx] = list(
+                            valid_sampled_token_ids[main_idx]
+                        )
+                elif in_audio:
+                    # Async path: the tokens are still on the GPU, and this is
+                    # the same tensor the async output and the next step's
+                    # prev_sampled_token_ids read, so overwrite it in place.
+                    sampled_token_ids[shadow_idx] = sampled_token_ids[main_idx]
+                else:
+                    sampled_token_ids[shadow_idx] = 0
 
         # Cache the sampled tokens in the model runner, so that the scheduler
         # doesn't need to send them back.
@@ -4365,7 +4802,12 @@ class GPUModelRunner(
             tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
             num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
             max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
-            num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
+            # Recomputed locally instead of using
+            # scheduler_output.total_num_scheduled_tokens: with CFG a request
+            # can be scheduled while it is no longer in the persistent batch
+            # (see _update_states), and the input tensors below are built from
+            # the batch, so padding and attention metadata must follow it.
+            num_tokens_unpadded = int(num_scheduled_tokens_np.sum())
 
             logits_indices, spec_decode_metadata, max_num_sampled_tokens = (
                 self._prepare_inputs(scheduler_output, num_scheduled_tokens_np)
@@ -4875,6 +5317,23 @@ class GPUModelRunner(
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()
 
+        # Audio-output models: advance the per-request phase machine with this
+        # step's tokens, then decode the requests whose audio just finished.
+        audio_outputs: dict[str, str] | None = None
+        audio_model = self._audio_output_model()
+        if audio_model is not None:
+            audio_sampled_tokens = self._audio_sampled_tokens(
+                sampler_output.sampled_token_ids,
+                valid_sampled_token_ids,
+                invalid_req_indices,
+            )
+            self._advance_audio_phases(
+                audio_model, req_ids_output_copy, audio_sampled_tokens
+            )
+            audio_outputs = self._collect_audio_outputs(
+                audio_model, req_ids_output_copy, audio_sampled_tokens
+            )
+
         # self.kv_connector_output may be modified during drafting
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
@@ -4893,6 +5352,7 @@ class GPUModelRunner(
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
                 routed_experts=None,
+                audio_outputs=audio_outputs,
             )
 
         if not self.use_async_scheduling:

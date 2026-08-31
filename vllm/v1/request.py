@@ -221,6 +221,19 @@ class Request:
         # the scheduler so the connector's request_finished hook runs.
         self.abort_immediately = abort_immediately
 
+        # CFG (classifier-free guidance) for audio-output models: a request
+        # with `extra_args["cfg"] > 1` is paired with a shadow request that
+        # carries the unconditional branch. `cfg_group_id` is shared by both
+        # halves; the pointers are set by `EngineCore.add_request` right after
+        # it builds the pair. All three stay None for every other request.
+        self.cfg_group_id: str | None = None
+        # main -> shadow
+        self.cfg_shadow_id: str | None = None
+        # shadow -> main
+        self.cfg_main_id: str | None = None
+        if sampling_params is not None and sampling_params.extra_args is not None:
+            self.cfg_group_id = sampling_params.extra_args.get("cfg_group_id")
+
     @classmethod
     def from_engine_core_request(
         cls,

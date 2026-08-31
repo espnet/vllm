@@ -222,6 +222,11 @@ class EngineCoreOutput(
 
     new_sampling_mask: SamplingMaskLists | None = None
 
+    # Audio-output models (bagpiper/opuslm): base64 WAV audio, set on the
+    # final output of an audio-generating request. Appended last so
+    # `array_like` positional serialization stays backward compatible.
+    audio_output: str | None = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

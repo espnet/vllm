@@ -34,6 +34,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse,
     ChatMessage,
+    OpenAIChatCompletionAudio,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     CompletionTokenUsageInfo,
@@ -55,12 +56,13 @@ from vllm.entrypoints.serve.utils.tool_calls_utils import (
 from vllm.inputs import EngineInput, MultiModalPlaceholders
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.outputs import RequestOutput
+from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
+from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
 from vllm.utils.serial_utils import numpy2base64
 
@@ -110,6 +112,92 @@ def _make_completion_tokens_details(
     reasoning_tokens: int,
 ) -> CompletionTokenUsageInfo:
     return CompletionTokenUsageInfo(reasoning_tokens=reasoning_tokens)
+
+
+# --- Audio-output models (bagpiper / opuslm / opuslm_dialogue) --------------
+#
+# These models generate a multi-stream sequence: the text transcript first,
+# then an "assistant output" marker token, then interleaved audio codec tokens.
+# ``CompletionOutput.text`` is unusable as the assistant message because most
+# of the stream-0 ids after the marker are codec ids outside the text
+# vocabulary, so the detokenizer renders them as junk. When the engine attaches
+# generated audio we therefore re-derive the transcript from the raw ids.
+#
+# The values needed to do that differ per checkpoint, so they are read from
+# hf_config rather than hardcoded (the original fork hardcoded bagpiper's
+# marker id 6 and range [256, 152192), which produced a garbage transcript for
+# both opuslm models -- opuslm's SSL tokens fall inside [256, 152192) and it
+# has no token 6):
+#
+#   marker id  : ``assistant_token_id``         bagpiper  = 6
+#                ``assistant_output_token_id``  opuslm*   = 10
+#   range start: ``text_token_offset``          bagpiper  = 256
+#                ``text_token_start``           opuslm*   = 13448
+#   range end  : ``text_token_end``             all three = 152192 / 113800
+#                                                           / 62600
+#
+# A config that declares none of them gets no re-derivation at all -- see
+# ``_audio_transcript_token_spec``.
+
+
+def _first_int_attr(obj: Any, names: GenericSequence[str]) -> int | None:
+    """Value of the first attribute in ``names`` that is a plain ``int``.
+
+    ``bool`` is rejected on purpose: it is an ``int`` subclass, and a config
+    flag that happens to share one of these names must not be read as a token
+    id.
+    """
+    for name in names:
+        value = getattr(obj, name, None)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
+
+
+def _audio_transcript_token_spec(
+    hf_config: Any,
+) -> tuple[int | None, int, int] | None:
+    """Resolve ``(marker_id, range_start, range_end)`` from ``hf_config``.
+
+    Returns ``None`` when the config does not describe a usable text-token
+    range. The caller must then leave the upstream-computed ``content``
+    untouched: emitting a transcript derived from unknown constants would be
+    worse than passing through whatever the detokenizer produced.
+
+    ``marker_id`` may be ``None`` while the range is present; see
+    ``_derive_audio_transcript_ids``.
+    """
+    range_start = _first_int_attr(hf_config, ("text_token_offset", "text_token_start"))
+    range_end = _first_int_attr(hf_config, ("text_token_end",))
+    if range_start is None or range_end is None or range_start >= range_end:
+        return None
+    marker_id = _first_int_attr(
+        hf_config, ("assistant_token_id", "assistant_output_token_id")
+    )
+    return marker_id, range_start, range_end
+
+
+def _derive_audio_transcript_ids(
+    token_ids: GenericSequence[int],
+    marker_id: int | None,
+    range_start: int,
+    range_end: int,
+) -> list[int]:
+    """Text-vocabulary ids that precede the assistant-output marker.
+
+    When ``marker_id`` is ``None`` -- a checkpoint that declares a text range
+    but no marker token -- we scan to end-of-sequence and rely on the range
+    filter alone. That degrades gracefully rather than failing: for these
+    models the codec and SSL ids emitted after the marker already sit outside
+    the text range, so the marker is an early exit, not the only filter.
+    """
+    text_ids: list[int] = []
+    for tid in token_ids:
+        if marker_id is not None and tid == marker_id:
+            break
+        if range_start <= tid < range_end:
+            text_ids.append(tid)
+    return text_ids
 
 
 class OpenAIServingChat(GenerateBaseServing):
@@ -427,6 +515,54 @@ class OpenAIServingChat(GenerateBaseServing):
         ``parser`` and mutate/replace ``message``.
         """
         return message
+
+    def _attach_audio_output(
+        self,
+        message: ChatMessage,
+        output: CompletionOutput,
+        tokenizer: TokenizerLike | None,
+    ) -> None:
+        """Attach engine-generated audio, and its transcript, to ``message``.
+
+        No-op unless the engine produced audio for this output, so non-audio
+        models pay a single ``getattr`` per choice. This is a separate method
+        rather than a ``_finalize_response_message`` override because that hook
+        already has another implementor (the Cohere v2 handler) and does not
+        receive ``output``/``tokenizer``; widening its signature would ripple.
+
+        The streaming path deliberately gets nothing: the WAV only exists once
+        audio decoding has finished, so there is no streaming audio.
+        """
+        # ``audio_output`` is declared ``str | None``. Requiring a non-empty
+        # ``str`` rather than bare truthiness costs nothing and keeps the
+        # response builder from reaching pydantic validation when a test passes
+        # a ``MagicMock`` as ``output`` (every attribute of which is truthy).
+        audio_data = getattr(output, "audio_output", None)
+        if not isinstance(audio_data, str) or not audio_data:
+            return
+
+        spec = _audio_transcript_token_spec(
+            getattr(self.model_config, "hf_config", None)
+        )
+        if spec is not None and tokenizer is not None:
+            marker_id, range_start, range_end = spec
+            text_ids = _derive_audio_transcript_ids(
+                output.token_ids, marker_id, range_start, range_end
+            )
+            if text_ids:
+                message.content = tokenizer.decode(text_ids, skip_special_tokens=False)
+            else:
+                # No text ids at all (e.g. pure TTS). Keep whatever upstream
+                # computed, only normalising ``None`` to ``""`` -- matches the
+                # original fork so audio responses stay comparable with it.
+                message.content = message.content or ""
+
+        message.audio = OpenAIChatCompletionAudio(
+            id=f"audio-{random_uuid()}",
+            data=audio_data,
+            expires_at=int(time.time()) + 3600,
+            transcript=message.content or "",
+        )
 
     async def chat_completion_stream_generator(
         self,
@@ -1040,6 +1176,11 @@ class OpenAIServingChat(GenerateBaseServing):
             # citation-aware handlers use this to surface grounding
             # metadata cached on the reasoning parser.
             message = self._finalize_response_message(message, parser=parser)
+
+            # Audio-output models: replace ``content`` with the transcript
+            # re-derived from the raw ids and attach the generated WAV.
+            # No-op for every other model.
+            self._attach_audio_output(message, output, tokenizer)
 
             # In OpenAI's API, when a tool is called, the finish_reason is:
             # "tool_calls" for "auto" or "required" tool calls,
