@@ -18,14 +18,20 @@ Contract notes (see the API docs for the full picture):
     after the audio segment finishes.
   - CFG doubles per-request KV usage (a shadow request is created
     server-side); cfg=1.0 is equivalent to plain tts.
-  - The model chooses its own output mode. In text_audio mode it may still
-    answer with text only, ending at eos(2) without ever emitting eot(3);
-    the request then legitimately returns no audio. Whether it produces
-    audio depends on the prompt: the prompt has to carry the content to
-    render. "Read this aloud in a calm voice." on its own returns text
-    only, while the same instruction followed by the actual sentence
-    returns a WAV. Prompts describing a sound to synthesise ("A dog
-    barking twice in a quiet room.") also return a WAV.
+  - The model chooses its own output mode. In text_audio mode it first
+    emits a <think> reasoning block, then a text segment describing the
+    audio it is about to render, and only then the codec frames. It may
+    instead stop after the text at eos(2) without ever emitting eot(3),
+    in which case the request legitimately returns no audio.
+  - A system message decides whether that happens. Measured on the
+    released checkpoint, same prompt and sampling, max_tokens 12000:
+    "You are a helpful assistant." gave audio in 7 of 8 requests, and
+    omitting the system message gave audio in 0 of 8. So tts/tts_cfg
+    default --system to that sentence, which is also what the upstream
+    reference client sends on every request. Prompt wording is a much
+    weaker lever: without a system message, four different prompt shapes
+    (instruction+sentence, bare sentence, "Say: ...", and a sound
+    description) all returned text only, 0 of 16.
 
 Usage:
   python client_bagpiper.py --task text --prompt "What is 2+2?"
@@ -163,8 +169,8 @@ def main():
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=9811)
     parser.add_argument("--model", default="bagpiper")
-    # The default carries the sentence to render, not just the instruction:
-    # the instruction alone makes the model answer with text and no audio.
+    # The default carries the sentence to render, not just the instruction,
+    # so that the rendered audio is checkable against a known target.
     parser.add_argument(
         "--prompt",
         default=(
@@ -172,7 +178,15 @@ def main():
             "The quick brown fox jumps over the lazy dog."
         ),
     )
-    parser.add_argument("--system", default=None, help="System message")
+    parser.add_argument(
+        "--system",
+        default=None,
+        help=(
+            "System message. Default: 'You are a helpful assistant.' for "
+            "tts/tts_cfg (it is what makes the model emit audio at all), "
+            "none otherwise. Pass --system '' to send none."
+        ),
+    )
     parser.add_argument(
         "--audio", default=None, help="Audio file (audio_understand)"
     )
@@ -193,6 +207,12 @@ def main():
 
     if args.max_tokens is None:
         args.max_tokens = 12000 if args.task in ("tts", "tts_cfg") else 4096
+
+    # The system message is what decides whether tts returns audio at all
+    # (7/8 with it, 0/8 without -- see the contract notes above), so default
+    # it on for the two audio tasks. `--system ''` still opts out.
+    if args.system is None and args.task in ("tts", "tts_cfg"):
+        args.system = "You are a helpful assistant."
 
     url = f"http://{args.host}:{args.port}/v1/chat/completions"
     payload = build_payload(args)
