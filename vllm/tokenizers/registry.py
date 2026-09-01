@@ -179,47 +179,74 @@ def resolve_tokenizer_args(
 cached_resolve_tokenizer_args = lru_cache(resolve_tokenizer_args)
 
 
-def _inject_opuslm_tokenizer_kwargs(hf_config, kwargs: dict) -> dict:
+# The kwargs the two OpusLM tokenizers pop in ``from_pretrained``, as
+# (kwarg suffix, hf_config field, fallback). Injecting a name a tokenizer does
+# not pop would forward it to transformers and raise there, so these tables have
+# to stay in step with the two ``from_pretrained`` bodies. The task tokens and
+# stream count are here because the tokenizer lays ESPnet's task layout over
+# text-only prompts; prompts that carry audio get the same layout from
+# OpusLMMultiModalProcessor, which reads the config directly. Both sides go
+# through OpusLMTaskLayout, so they agree.
+_OPUSLM_COMMON_TOKENIZER_KWARGS = (
+    ("text_token_offset", "text_token_start", 13448),
+    ("pad_token_id", "pad_token_id", 0),
+    ("eos_token_id", "eos_token_id", 5),
+    ("codec_ssl_start_end_token_id", "codec_ssl_start_end_token_id", 34),
+    ("text_bpe_start_end_token_id", "text_bpe_start_end_token_id", 35),
+    ("textlm_task_token_id", "textlm_task_token_id", 64),
+    ("codec_ssl_asr_task_token_id", "codec_ssl_asr_task_token_id", 80),
+    ("codec_ssl_tts_task_token_id", "codec_ssl_tts_task_token_id", 81),
+    ("codec_ssl_plain_tts_task_token_id", "codec_ssl_plain_tts_task_token_id", 82),
+    ("codec_ssl_audiolm_task_token_id", "codec_ssl_audiolm_task_token_id", 83),
+    ("text_dialogue_task_token_id", "text_dialogue_task_token_id", 88),
+    ("audio_dialogue_task_token_id", "audio_dialogue_task_token_id", 89),
+    ("nq", "nq", 9),
+)
+
+_OPUSLM_TOKENIZER_KWARGS = {
+    # The two released checkpoints have different text vocabulary sizes, so
+    # text_token_end differs in its fallback. Both configs carry the field, so
+    # the fallback only decides what a config that omits it gets.
+    "opuslm": _OPUSLM_COMMON_TOKENIZER_KWARGS
+    + (("text_token_end", "text_token_end", 113800),),
+    # The dialogue tokenizer additionally needs the three role markers, because
+    # it is the one that builds multi-turn dialogue layouts.
+    "opuslm_dialogue": _OPUSLM_COMMON_TOKENIZER_KWARGS
+    + (
+        ("text_token_end", "text_token_end", 62600),
+        ("system_prompt_token_id", "system_prompt_token_id", 8),
+        ("user_input_token_id", "user_input_token_id", 9),
+        ("assistant_output_token_id", "assistant_output_token_id", 10),
+    ),
+}
+
+
+def _inject_opuslm_tokenizer_kwargs(
+    model_type: str, hf_config, kwargs: dict
+) -> dict:
     """Fill OpusLM tokenizer kwargs from the model's hf_config.
 
-    OpusLMTokenizer.from_pretrained pops these ``opuslm_*``-prefixed kwargs to
-    configure the global-vocab shift. Note that this only covers the base
-    ``opuslm`` model type: the dialogue tokenizer reads ``opuslm_dialogue_*``
-    kwargs, which are deliberately never injected here — its hardcoded
-    defaults match the shipped checkpoint (known limitation kept as-is).
+    Both OpusLM tokenizers configure their global-vocab shift and their ESPnet
+    task layout from ``<model_type>_``-prefixed kwargs, falling back to the
+    released checkpoints' values when a kwarg is absent. Reading them off the
+    config means a checkpoint that renumbers a task token still gets the layout
+    its own config describes, instead of silently getting the released one. A
+    kwarg the caller passed explicitly still wins.
     """
     kwargs = dict(kwargs)
-    kwargs.setdefault(
-        "opuslm_text_token_offset",
-        int(getattr(hf_config, "text_token_start", 13448)),
-    )
-    kwargs.setdefault(
-        "opuslm_text_token_end",
-        int(getattr(hf_config, "text_token_end", 113800)),
-    )
-    kwargs.setdefault(
-        "opuslm_pad_token_id",
-        int(getattr(hf_config, "pad_token_id", 0)),
-    )
-    kwargs.setdefault(
-        "opuslm_eos_token_id",
-        int(getattr(hf_config, "eos_token_id", 5)),
-    )
-    kwargs.setdefault(
-        "opuslm_codec_ssl_start_end_token_id",
-        int(getattr(hf_config, "codec_ssl_start_end_token_id", 34)),
-    )
-    kwargs.setdefault(
-        "opuslm_text_bpe_start_end_token_id",
-        int(getattr(hf_config, "text_bpe_start_end_token_id", 35)),
-    )
+    for suffix, field, default in _OPUSLM_TOKENIZER_KWARGS[model_type]:
+        value = getattr(hf_config, field, None)
+        kwargs.setdefault(
+            f"{model_type}_{suffix}",
+            default if value is None else int(value),
+        )
     return kwargs
 
 
 def tokenizer_args_from_config(config: "ModelConfig", **kwargs):
     model_type = getattr(config.hf_config, "model_type", None)
-    if model_type == "opuslm":
-        kwargs = _inject_opuslm_tokenizer_kwargs(config.hf_config, kwargs)
+    if model_type in _OPUSLM_TOKENIZER_KWARGS:
+        kwargs = _inject_opuslm_tokenizer_kwargs(model_type, config.hf_config, kwargs)
 
     return cached_resolve_tokenizer_args(
         config.tokenizer,
@@ -331,9 +358,8 @@ def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
     # here as well (resolve_tokenizer_args only sees what we pass down).
     hf_config = getattr(model_config, "hf_config", None)
     model_type = getattr(hf_config, "model_type", None)
-    if model_type == "opuslm":
-        kwargs = _inject_opuslm_tokenizer_kwargs(hf_config, kwargs)
-    if model_type in ("opuslm", "opuslm_dialogue"):
+    if model_type in _OPUSLM_TOKENIZER_KWARGS:
+        kwargs = _inject_opuslm_tokenizer_kwargs(model_type, hf_config, kwargs)
         kwargs.setdefault("model_type", model_type)
 
     return cached_get_tokenizer(

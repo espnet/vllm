@@ -16,9 +16,33 @@ from typing import Any, overload
 from transformers import BatchEncoding
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.transformers_utils.configs.opuslm import OpusLMTaskLayout
 
 from .hf import CachedHfTokenizer
 from .protocol import TokenizerLike
+
+# What an audio item looks like in a conversation by the time the renderer calls
+# apply_chat_template: with the "openai" content format the parts survive as
+# dicts, and with the "string" format each one has already been replaced by the
+# model's placeholder string (OpusLMForCausalLM.get_placeholder_str).
+_AUDIO_PART_TYPES = frozenset({"input_audio", "audio_url", "audio"})
+_AUDIO_PLACEHOLDER_STRS = ("<codec_ssl_start_end>", "<codec_ssl_start/end>")
+
+
+def _conversation_has_audio(messages: Sequence[Any]) -> bool:
+    """Whether any message in the conversation carries an audio item."""
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            if any(ph in content for ph in _AUDIO_PLACEHOLDER_STRS):
+                return True
+        elif isinstance(content, Sequence):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") in _AUDIO_PART_TYPES:
+                    return True
+    return False
 
 
 class OpusLMTokenizer(CachedHfTokenizer):
@@ -42,6 +66,28 @@ class OpusLMTokenizer(CachedHfTokenizer):
         text_bpe_start_end_token_id = int(
             kwargs.pop("opuslm_text_bpe_start_end_token_id", 35)
         )
+        # The task layout the tokenizer lays over text-only prompts. Every id
+        # here is also a field of OpusLMTaskLayout, whose own defaults match the
+        # shipped checkpoint, so a missing kwarg degrades to the same value.
+        task_layout = OpusLMTaskLayout(
+            sos_eos_token_id=eos_token_id,
+            pad_token_id=pad_token_id,
+            codec_ssl_start_end_token_id=codec_ssl_start_end_token_id,
+            text_bpe_start_end_token_id=text_bpe_start_end_token_id,
+            **{
+                field: int(kwargs.pop(f"opuslm_{field}", default))
+                for field, default in (
+                    ("textlm_task_token_id", 64),
+                    ("codec_ssl_asr_task_token_id", 80),
+                    ("codec_ssl_tts_task_token_id", 81),
+                    ("codec_ssl_plain_tts_task_token_id", 82),
+                    ("codec_ssl_audiolm_task_token_id", 83),
+                    ("text_dialogue_task_token_id", 88),
+                    ("audio_dialogue_task_token_id", 89),
+                    ("nq", 9),
+                )
+            },
+        )
 
         tokenizer = super().from_pretrained(
             path_or_repo_id,
@@ -59,6 +105,7 @@ class OpusLMTokenizer(CachedHfTokenizer):
             eos_token_id=eos_token_id,
             codec_ssl_start_end_token_id=codec_ssl_start_end_token_id,
             text_bpe_start_end_token_id=text_bpe_start_end_token_id,
+            task_layout=task_layout,
         )
 
     def __init__(
@@ -71,6 +118,7 @@ class OpusLMTokenizer(CachedHfTokenizer):
         eos_token_id: int,
         codec_ssl_start_end_token_id: int,
         text_bpe_start_end_token_id: int,
+        task_layout: OpusLMTaskLayout | None = None,
     ) -> None:
         super().__init__()
         self.tokenizer = tokenizer
@@ -84,6 +132,15 @@ class OpusLMTokenizer(CachedHfTokenizer):
         self._bos_token_id = int(eos_token_id)
         self._codec_ssl_start_end_token_id = int(codec_ssl_start_end_token_id)
         self._text_bpe_start_end_token_id = int(text_bpe_start_end_token_id)
+
+        # Callers that build the tokenizer directly (tests) may omit the layout;
+        # fall back to one carrying the ids we do have plus the shipped defaults.
+        self._task_layout = task_layout or OpusLMTaskLayout(
+            sos_eos_token_id=self._eos_token_id,
+            pad_token_id=self._pad_token_id,
+            codec_ssl_start_end_token_id=self._codec_ssl_start_end_token_id,
+            text_bpe_start_end_token_id=self._text_bpe_start_end_token_id,
+        )
 
         self._special_id_to_token: dict[int, str] = {
             self._pad_token_id: "<pad>",
@@ -247,15 +304,55 @@ class OpusLMTokenizer(CachedHfTokenizer):
         *,
         messages: list["ChatCompletionMessageParam"] | None = None,
         tools: list[dict[str, Any]] | None = None,
+        mode: str | None = None,
+        task: str | int | None = None,
         **kwargs,
     ) -> str | list[int]:
+        """Render a conversation into an OpusLM prompt.
+
+        The rendered text is wrapped in the ESPnet task layout, which is the
+        only shape the model was trained on. That has to happen here because a
+        request without audio never reaches OpusLMMultiModalProcessor: vLLM's
+        input preprocessor returns the tokenized prompt untouched when there is
+        no multimodal data, so the tokenizer is the last hook on that path.
+
+        `mode` and `task` select the task token, and are declared explicitly
+        rather than swallowed by **kwargs on purpose -- vLLM only forwards
+        `chat_template_kwargs` entries that name a real parameter of this
+        method (see resolve_chat_template_kwargs in vllm/renderers/hf.py), so a
+        catch-all would silently drop them. With neither given, the task
+        defaults to plain TTS, matching the model-side resolver.
+
+        Token IDs are returned whether or not `tokenize` was requested. The
+        OpenAI chat path asks for a string (preprocess_chat in
+        vllm/renderers/online_renderer.py pins `tokenize=False` for every
+        non-Mistral tokenizer) and tokenizes it later, and a layout expressed in
+        token IDs cannot survive that round trip. Returning IDs is safe because
+        parse_dec_only_prompt turns a list of ints into a TokensPrompt, which
+        the input preprocessor forwards to the engine unchanged.
+        """
         msgs = conversation if conversation is not None else messages
         if msgs is None:
             msgs = []
         out = self.tokenizer.apply_chat_template(msgs, tools=tools, **kwargs)
+
+        if _conversation_has_audio(msgs):
+            # Requests carrying audio are laid out by OpusLMMultiModalProcessor,
+            # which re-tokenizes the rendered string itself. Adding the layout
+            # here would duplicate the markers and hide the audio placeholder.
+            return out
+
         if isinstance(out, list):
-            return [int(tid) + self.text_token_offset for tid in out]
-        return out
+            body_ids = [int(tid) + self.text_token_offset for tid in out]
+        else:
+            body_ids = self.encode(out)
+
+        task_token_id = self._task_layout.resolve_task_token_id(
+            has_audio_input=False,
+            mode=mode,
+            task=task,
+        )
+        return self._task_layout.apply(body_ids, task_token_id)
 
     @overload
     def convert_tokens_to_ids(self, tokens: str) -> int: ...
@@ -341,4 +438,12 @@ class OpusLMTokenizer(CachedHfTokenizer):
         return out
 
     def __getattr__(self, name: str) -> Any:
+        # __getattr__ only runs for attributes missing on self, so delegating
+        # "tokenizer" itself would recurse forever. That is reachable: copy
+        # and pickle build a bare instance without calling __init__, then
+        # probe it (copy._reconstruct does hasattr(obj, "__setstate__")), so
+        # self.tokenizer is not set yet. vllm/renderers/hf.py copies the
+        # tokenizer on every server start, which hit exactly this.
+        if name == "tokenizer":
+            raise AttributeError(name)
         return getattr(self.tokenizer, name)

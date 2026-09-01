@@ -18,9 +18,29 @@ from typing import Any, overload
 from transformers import BatchEncoding
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.transformers_utils.configs.opuslm import OpusLMTaskLayout
 
 from .hf import CachedHfTokenizer
+from .opuslm import _conversation_has_audio
 from .protocol import TokenizerLike
+
+
+def _message_text(content: Any) -> str:
+    """The plain text of one chat message, whatever content shape it arrived in.
+
+    A message is either a bare string or a list of typed parts; only the text
+    parts belong in a dialogue turn, and a conversation that also carries audio
+    parts never reaches this code (the multimodal processor handles those).
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, Sequence):
+        return "".join(
+            str(part.get("text", ""))
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return ""
 
 
 class OpusLMDialogueTokenizer(CachedHfTokenizer):
@@ -44,6 +64,31 @@ class OpusLMDialogueTokenizer(CachedHfTokenizer):
         text_bpe_start_end_token_id = int(
             kwargs.pop("opuslm_dialogue_text_bpe_start_end_token_id", 35)
         )
+        # The layout the tokenizer lays over text-only dialogue prompts. Every
+        # id here is also a field of OpusLMTaskLayout, whose own defaults match
+        # the shipped checkpoint, so a missing kwarg degrades to the same value.
+        task_layout = OpusLMTaskLayout(
+            sos_eos_token_id=eos_token_id,
+            pad_token_id=pad_token_id,
+            codec_ssl_start_end_token_id=codec_ssl_start_end_token_id,
+            text_bpe_start_end_token_id=text_bpe_start_end_token_id,
+            **{
+                field: int(kwargs.pop(f"opuslm_dialogue_{field}", default))
+                for field, default in (
+                    ("textlm_task_token_id", 64),
+                    ("codec_ssl_asr_task_token_id", 80),
+                    ("codec_ssl_tts_task_token_id", 81),
+                    ("codec_ssl_plain_tts_task_token_id", 82),
+                    ("codec_ssl_audiolm_task_token_id", 83),
+                    ("text_dialogue_task_token_id", 88),
+                    ("audio_dialogue_task_token_id", 89),
+                    ("system_prompt_token_id", 8),
+                    ("user_input_token_id", 9),
+                    ("assistant_output_token_id", 10),
+                    ("nq", 9),
+                )
+            },
+        )
 
         tokenizer = super().from_pretrained(
             path_or_repo_id,
@@ -61,6 +106,7 @@ class OpusLMDialogueTokenizer(CachedHfTokenizer):
             eos_token_id=eos_token_id,
             codec_ssl_start_end_token_id=codec_ssl_start_end_token_id,
             text_bpe_start_end_token_id=text_bpe_start_end_token_id,
+            task_layout=task_layout,
         )
 
     def __init__(
@@ -73,6 +119,7 @@ class OpusLMDialogueTokenizer(CachedHfTokenizer):
         eos_token_id: int,
         codec_ssl_start_end_token_id: int,
         text_bpe_start_end_token_id: int,
+        task_layout: OpusLMTaskLayout | None = None,
     ) -> None:
         super().__init__()
         self.tokenizer = tokenizer
@@ -86,6 +133,15 @@ class OpusLMDialogueTokenizer(CachedHfTokenizer):
         self._bos_token_id = int(eos_token_id)
         self._codec_ssl_start_end_token_id = int(codec_ssl_start_end_token_id)
         self._text_bpe_start_end_token_id = int(text_bpe_start_end_token_id)
+
+        # Callers that build the tokenizer directly (tests) may omit the layout;
+        # fall back to one carrying the ids we do have plus the shipped defaults.
+        self._task_layout = task_layout or OpusLMTaskLayout(
+            sos_eos_token_id=self._eos_token_id,
+            pad_token_id=self._pad_token_id,
+            codec_ssl_start_end_token_id=self._codec_ssl_start_end_token_id,
+            text_bpe_start_end_token_id=self._text_bpe_start_end_token_id,
+        )
 
         self._special_id_to_token: dict[int, str] = {
             self._pad_token_id: "<pad>",
@@ -246,14 +302,65 @@ class OpusLMDialogueTokenizer(CachedHfTokenizer):
     def apply_chat_template(
         self,
         conversation: list["ChatCompletionMessageParam"] | None = None,
+        *,
+        messages: list["ChatCompletionMessageParam"] | None = None,
         tools: list[dict[str, Any]] | None = None,
+        mode: str | None = None,
+        task: str | int | None = None,
         **kwargs,
     ) -> str | list[int]:
-        messages = conversation if conversation is not None else kwargs.pop("messages", [])
-        out = self.tokenizer.apply_chat_template(messages, tools=tools, **kwargs)
-        if isinstance(out, list):
-            return [int(tid) + self.text_token_offset for tid in out]
-        return out
+        """Render a conversation into an OpusLM Dialogue prompt.
+
+        A dialogue whose turns are all text is laid out here, turn by turn,
+        because it never reaches OpusLMDialogueMultiModalProcessor: vLLM's input
+        preprocessor forwards a prompt carrying no multimodal data untouched, so
+        the tokenizer is the last hook on that path. Without this the model would
+        receive bare BPE with no task token, no role markers and no generation
+        target -- a shape it was never trained on.
+
+        A dialogue carrying audio is returned as the rendered string instead, for
+        the multimodal processor to lay out; it owns speaker prompts, audio
+        placeholders and the stream replay that goes with them.
+
+        `mode` and `task` select the task token and are declared explicitly
+        rather than swallowed by **kwargs on purpose -- vLLM forwards only the
+        `chat_template_kwargs` entries that name a real parameter of this method
+        (resolve_chat_template_kwargs in vllm/renderers/hf.py) -- and with
+        neither given the task is text dialogue, this model's text-only task.
+
+        Token IDs come back whether or not `tokenize` was requested, for the same
+        reason as OpusLMTokenizer.apply_chat_template: the OpenAI chat path pins
+        `tokenize=False` and tokenizes the string later, which no layout
+        expressed in token IDs can survive.
+        """
+        msgs = conversation if conversation is not None else messages
+        if msgs is None:
+            msgs = []
+        out = self.tokenizer.apply_chat_template(msgs, tools=tools, **kwargs)
+
+        if _conversation_has_audio(msgs):
+            return out
+
+        turns: list[tuple[str, list[int]]] = []
+        for message in msgs:
+            if not isinstance(message, dict):
+                continue
+            text = _message_text(message.get("content"))
+            if text == "":
+                # An empty message is the client marking the generation target;
+                # apply_dialogue appends that itself, and a non-target segment
+                # with no body would be markers around nothing.
+                continue
+            turns.append(
+                (str(message.get("role", "user")), self.encode(text, add_special_tokens=False))
+            )
+
+        task_token_id = self._task_layout.resolve_task_token_id(
+            has_audio_input=False,
+            mode=mode,
+            task=task if task is not None or mode is not None else "text_dialogue",
+        )
+        return self._task_layout.apply_dialogue(turns, task_token_id)
 
     @overload
     def convert_tokens_to_ids(self, tokens: str) -> int: ...
@@ -339,4 +446,12 @@ class OpusLMDialogueTokenizer(CachedHfTokenizer):
         return out
 
     def __getattr__(self, name: str) -> Any:
+        # __getattr__ only runs for attributes missing on self, so delegating
+        # "tokenizer" itself would recurse forever. That is reachable: copy
+        # and pickle build a bare instance without calling __init__, then
+        # probe it (copy._reconstruct does hasattr(obj, "__setstate__")), so
+        # self.tokenizer is not set yet. vllm/renderers/hf.py copies the
+        # tokenizer on every server start, which hit exactly this.
+        if name == "tokenizer":
+            raise AttributeError(name)
         return getattr(self.tokenizer, name)
