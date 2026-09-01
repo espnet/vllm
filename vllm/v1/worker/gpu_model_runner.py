@@ -4,6 +4,7 @@
 import functools
 import gc
 import itertools
+import os
 import threading
 import time
 from collections import defaultdict
@@ -254,6 +255,12 @@ if TYPE_CHECKING:
     from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
 logger = init_logger(__name__)
+
+# Traces one line per decode step per request through the ESPnet audio phase
+# machine (mode, phase, sampled stream-0 token, buffered frame count). Off by
+# default: it is the only way to see why a request produced no audio, but it
+# logs on every step.
+ESPNET_AUDIO_DEBUG = os.environ.get("VLLM_ESPNET_AUDIO_DEBUG", "0") == "1"
 
 
 def _get_parameter_for_reload(model: nn.Module, name: str) -> nn.Parameter:
@@ -3962,6 +3969,18 @@ class GPUModelRunner(
             if req_config is None or req_config.get("is_shadow"):
                 continue
             phase = req_config.get("phase")
+            if ESPNET_AUDIO_DEBUG:
+                logger.info(
+                    "[espnet-audio] req=%s mode=%s phase=%s token=%s "
+                    "audio_step=%s flush_remaining=%s frames=%d",
+                    req_id,
+                    req_config.get("mode"),
+                    phase,
+                    token,
+                    req_config.get("audio_step"),
+                    req_config.get("flush_remaining"),
+                    len(model._stream0_history.get(req_id, ())),
+                )
             if is_opuslm:
                 if req_config.get("mode") not in (
                     "text_audio",
@@ -3995,6 +4014,16 @@ class GPUModelRunner(
                 continue
             stream0 = model._stream0_history.pop(req_id, [])
             if not stream0:
+                # The request reached its decode marker without ever buffering
+                # a codec frame, so there is nothing to vocode. Silence here
+                # looks exactly like a text-only answer to the client, so say
+                # it out loud.
+                logger.warning(
+                    "Request %s finished in phase %s with no codec frames; "
+                    "no audio will be returned.",
+                    req_id,
+                    phase,
+                )
                 continue
             wav_base64 = model.encode_audio_to_base64_wav(req_id, stream0)
             if wav_base64:

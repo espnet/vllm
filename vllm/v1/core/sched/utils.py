@@ -1,10 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import os
 from collections.abc import Sequence
 
+from vllm.logger import init_logger
 from vllm.sampling_params import RepetitionDetectionParams
+from vllm.transformers_utils.configs.opuslm import AUDIO_OUT_MODES, MODE_TO_TASK_ALIAS
 from vllm.v1.request import Request, RequestStatus
+
+logger = init_logger(__name__)
+
+# Traces the OpusLM EOS-deferral decision. Shares the switch with the audio
+# phase tracer in the model runner: a request that returns no audio is almost
+# always a disagreement between these two, so they have to be readable together.
+ESPNET_AUDIO_DEBUG = os.environ.get("VLLM_ESPNET_AUDIO_DEBUG", "0") == "1"
 
 
 def _has_repeating_pattern(
@@ -91,12 +101,14 @@ def remove_all(lst: list, items_to_remove: set) -> list:
     return [item for item in lst if item not in items_to_remove]
 
 
-# OpusLM TTS/dialogue task tokens, used only as a fallback when the caller
-# passes `opuslm_delay_steps` without an explicit task-id set. The scheduler
-# always derives the real ids from the model config.
-_DEFAULT_OPUSLM_TTS_TASK_IDS = frozenset({81, 82, 88, 89})
+# OpusLM task tokens whose target segment is codec frames, used only as a
+# fallback when the caller passes `opuslm_delay_steps` without an explicit
+# task-id set. The scheduler always derives the real ids from the model config.
+_DEFAULT_OPUSLM_TTS_TASK_IDS = frozenset({81, 82, 89})
 
-# `extra_args["task"]` values whose responses contain an audio stream.
+# `extra_args["task"]` values whose responses contain an audio stream. The
+# text-output tasks (asr, textlm, text_dialogue) are deliberately absent: they
+# never enter the audio phase, so they have no flush tail to wait for.
 _OPUSLM_AUDIO_TASKS = frozenset(
     {
         "tts",
@@ -107,8 +119,6 @@ _OPUSLM_AUDIO_TASKS = frozenset(
         "codec_ssl_plain_tts_task",
         "audio_dialogue",
         "audio_dialogue_task",
-        "text_dialogue",
-        "text_dialogue_task",
     }
 )
 
@@ -119,38 +129,47 @@ def _is_opuslm_tts_request(
 ) -> bool:
     """Whether this request generates an audio stream (and therefore emits the
     ARDelay flush tail that the EOS deferral is about)."""
-    tts_task_ids = (
-        opuslm_tts_task_ids
-        if opuslm_tts_task_ids is not None
-        else _DEFAULT_OPUSLM_TTS_TASK_IDS
-    )
-    # The task token is the second prompt token for every opuslm prompt. A miss
-    # is not conclusive: a CFG shadow has an all-zero prompt, yet it mirrors its
-    # main request's audio tokens, so it has the same flush tail and must defer
-    # too. Fall through to the sampling params, which the shadow inherits.
-    prompt_token_ids = request.prompt_token_ids
-    if (
-        prompt_token_ids is not None
-        and len(prompt_token_ids) >= 2
-        and int(prompt_token_ids[1]) in tts_task_ids
-    ):
-        return True
-
     extra_args = (
         request.sampling_params.extra_args
         if request.sampling_params is not None
         else None
     )
-    if not extra_args:
-        return False
-    mode = extra_args.get("mode")
-    if mode in ("audio_text", "text_text"):
-        # Text-only response: no audio stream, no flush tail.
-        return False
-    task = extra_args.get("task")
-    if not isinstance(task, str):
-        return False
-    return task.lower() in _OPUSLM_AUDIO_TASKS
+    if extra_args:
+        # `mode` is what clients actually send, and it is the same predicate the
+        # model runner uses to decide whether to collect audio, so keying on it
+        # keeps the stop rule and the audio egress from disagreeing.
+        mode = extra_args.get("mode")
+        if isinstance(mode, str):
+            mode_norm = mode.strip().lower()
+            if mode_norm in AUDIO_OUT_MODES:
+                return True
+            if mode_norm in MODE_TO_TASK_ALIAS:
+                # A known text-output mode: no audio stream, no flush tail.
+                return False
+        task = extra_args.get("task")
+        if isinstance(task, str):
+            return task.strip().lower() in _OPUSLM_AUDIO_TASKS
+        if isinstance(task, int) and not isinstance(task, bool):
+            return int(task) in (
+                opuslm_tts_task_ids
+                if opuslm_tts_task_ids is not None
+                else _DEFAULT_OPUSLM_TTS_TASK_IDS
+            )
+
+    # No per-request hint: fall back to the task token, which is the second
+    # prompt token of every laid-out opuslm prompt. This is also the only signal
+    # a CFG shadow reaching here without extra_args would have.
+    tts_task_ids = (
+        opuslm_tts_task_ids
+        if opuslm_tts_task_ids is not None
+        else _DEFAULT_OPUSLM_TTS_TASK_IDS
+    )
+    prompt_token_ids = request.prompt_token_ids
+    return (
+        prompt_token_ids is not None
+        and len(prompt_token_ids) >= 2
+        and int(prompt_token_ids[1]) in tts_task_ids
+    )
 
 
 def _should_defer_opuslm_eos_stop(
@@ -197,6 +216,24 @@ def check_stop(
 
     last_token_id = request.output_token_ids[-1]
     if last_token_id == sampling_params.eos_token_id:
+        if ESPNET_AUDIO_DEBUG:
+            prompt_token_ids = request.prompt_token_ids
+            logger.info(
+                "[espnet-stop] req=%s n_out=%d eos=%s prompt_head=%s "
+                "delay_steps=%s task_ids=%s extra_args=%s is_tts=%s defer=%s",
+                request.request_id,
+                request.num_output_tokens,
+                sampling_params.eos_token_id,
+                list(prompt_token_ids[:3]) if prompt_token_ids else None,
+                opuslm_delay_steps,
+                sorted(opuslm_tts_task_ids) if opuslm_tts_task_ids else None,
+                sampling_params.extra_args,
+                _is_opuslm_tts_request(request, opuslm_tts_task_ids),
+                opuslm_delay_steps is not None
+                and _should_defer_opuslm_eos_stop(
+                    request, opuslm_delay_steps, opuslm_tts_task_ids
+                ),
+            )
         if opuslm_delay_steps is not None and _should_defer_opuslm_eos_stop(
             request, opuslm_delay_steps, opuslm_tts_task_ids
         ):

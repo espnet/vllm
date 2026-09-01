@@ -129,10 +129,14 @@ class Scheduler(SchedulerInterface):
         if hasattr(hf_config, "codec_ssl_tts_task_token_id") and hasattr(
             hf_config, "codec_ssl_plain_tts_task_token_id"
         ):
+            # Every task whose *target* segment is codec frames: the two TTS
+            # tasks and audio dialogue. `text_dialogue` is excluded on purpose --
+            # it answers with text, so it has no flush tail.
             self._opuslm_tts_task_ids = frozenset(
                 {
                     int(hf_config.codec_ssl_tts_task_token_id),
                     int(hf_config.codec_ssl_plain_tts_task_token_id),
+                    int(getattr(hf_config, "audio_dialogue_task_token_id", 89)),
                 }
             )
             self._opuslm_delay_steps = max(1, int(getattr(hf_config, "nq", 9)) - 1)
