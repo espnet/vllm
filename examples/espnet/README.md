@@ -17,5 +17,8 @@ Layout:
 - `docker/` — Dockerfile deriving from `vllm/vllm-openai:v0.28.0` with
   this fork's Python code and the ESPnet runtime dependencies.
 
-Full documentation (Chinese): _placeholder — link to be added by the
-integrator._
+Start here: [`GETTING_STARTED.zh.md`](GETTING_STARTED.zh.md) (Chinese) is
+the full guide — what the three models are, the shortest path from
+checkpoint to a served request, runnable examples with measured results,
+building the Docker image on a personal machine, what was verified on
+which hardware, and the known limitations.

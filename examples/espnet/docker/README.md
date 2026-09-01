@@ -13,9 +13,12 @@ From the **repo root** (the build context must be the repo root):
 docker build -f examples/espnet/docker/Dockerfile -t espnet-vllm:v0.28.0 .
 ```
 
-Alternative: instead of `COPY`ing the local checkout, the Dockerfile
-documents a `git clone` variant driven by `VLLM_FORK_URL` /
-`VLLM_FORK_REF` build args — see the comments in the Dockerfile.
+This `COPY`s the local checkout, so the image contains exactly your
+working tree. To build from a remote instead, edit the Dockerfile: replace
+the `COPY . /workspace/vllm-fork` line with the `ARG` + `git clone` block
+in the comment above it, then pass `--build-arg VLLM_FORK_URL=...
+--build-arg VLLM_FORK_REF=...`. The build args have no effect on their
+own — nothing reads them until that line is replaced.
 
 ## Run
 
