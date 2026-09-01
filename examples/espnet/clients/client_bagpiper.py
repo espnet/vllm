@@ -18,15 +18,24 @@ Contract notes (see the API docs for the full picture):
     after the audio segment finishes.
   - CFG doubles per-request KV usage (a shadow request is created
     server-side); cfg=1.0 is equivalent to plain tts.
+  - The model chooses its own output mode. In text_audio mode it may still
+    answer with text only, ending at eos(2) without ever emitting eot(3);
+    the request then legitimately returns no audio. Whether it produces
+    audio depends on the prompt: the prompt has to carry the content to
+    render. "Read this aloud in a calm voice." on its own returns text
+    only, while the same instruction followed by the actual sentence
+    returns a WAV. Prompts describing a sound to synthesise ("A dog
+    barking twice in a quiet room.") also return a WAV.
 
 Usage:
   python client_bagpiper.py --task text --prompt "What is 2+2?"
   python client_bagpiper.py --task audio_understand \
       --audio /path/to/audio.wav --prompt "What sound is in this audio?"
   python client_bagpiper.py --task tts \
-      --prompt "Read this aloud in a calm voice." --out out.wav
+      --prompt "Read this aloud in a calm voice: The quick brown fox \
+jumps over the lazy dog." --out out.wav
   python client_bagpiper.py --task tts_cfg --cfg 3.0 \
-      --prompt "Read this aloud in a calm voice." --out out.wav
+      --prompt "A dog barking twice in a quiet room." --out out.wav
 """
 
 import argparse
@@ -154,8 +163,14 @@ def main():
     parser.add_argument("--host", default="localhost")
     parser.add_argument("--port", type=int, default=9811)
     parser.add_argument("--model", default="bagpiper")
+    # The default carries the sentence to render, not just the instruction:
+    # the instruction alone makes the model answer with text and no audio.
     parser.add_argument(
-        "--prompt", default="Read this aloud in a calm voice."
+        "--prompt",
+        default=(
+            "Read this aloud in a calm voice: "
+            "The quick brown fox jumps over the lazy dog."
+        ),
     )
     parser.add_argument("--system", default=None, help="System message")
     parser.add_argument(

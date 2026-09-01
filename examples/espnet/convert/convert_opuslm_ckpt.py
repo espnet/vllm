@@ -211,6 +211,36 @@ def save_sharded_safetensors(
         print("  Saved index: model.safetensors.index.json")
 
 
+def fix_chat_template(output_dir: str) -> None:
+    """Replace the checkpoint's chat template with a content-only one.
+
+    ESPnet checkpoints ship a template that wraps each message in `<|role|>`
+    markers. Those markers are not entries of OpusLM's inner BPE vocabulary, so
+    the tokenizer encodes them as ordinary text and the model receives several
+    tokens of noise it was never trained on. All the structure OpusLM does need
+    -- `<sos/eos>`, the task token, `<text_bpe_start/end>`, the ARDelay pads and
+    `<codec_ssl_start/end>` -- is added afterwards by OpusLMTokenizer, in the
+    reserved ID range below text_token_start where it belongs.
+
+    Operators who want a different rendering can still pass `--chat-template`
+    to `vllm serve`, which overrides what is written here.
+    """
+    path = os.path.join(output_dir, "tokenizer_config.json")
+    if not os.path.exists(path):
+        print("  WARNING: no tokenizer_config.json to fix the chat template in")
+        return
+
+    with open(path) as f:
+        cfg = json.load(f)
+
+    cfg["chat_template"] = (
+        "{% for message in messages %}{{ message['content'] }}{% endfor %}"
+    )
+    with open(path, "w") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+    print("  Rewrote chat_template in tokenizer_config.json (content only)")
+
+
 def copy_config_files(output_dir: str, ref_dir: Path) -> None:
     """Copy config and tokenizer files from the reference checkpoint."""
     print(f"\nCopying config/tokenizer files from {ref_dir} ...")
@@ -222,6 +252,8 @@ def copy_config_files(output_dir: str, ref_dir: Path) -> None:
             print(f"  Copied {fname}")
         else:
             print(f"  WARNING: {fname} not found in reference dir, skipping")
+
+    fix_chat_template(output_dir)
 
 
 def main():

@@ -9,9 +9,15 @@ Tasks:
   textlm plain text LM continuation (task token 64)
 
 Contract notes:
-  - `mode` is sent in BOTH mm_processor_kwargs (prompt-build time) and
-    vllm_xargs (decode time). The processor uses it for the prompt
-    layout; the runner uses it for the phase machine.
+  - `mode` is sent in THREE places, because three different components pick
+    the task and none of them can see the others' copy:
+      chat_template_kwargs  the tokenizer, which lays out prompts that carry
+                            no audio (those never reach the processor)
+      mm_processor_kwargs   the multimodal processor, which lays out prompts
+                            that do carry audio
+      vllm_xargs            the model runner, for the decode phase machine
+    Send all three with the same value. A missing one is not an error, it is
+    a silently wrong task token.
   - OpusLM has no CFG.
   - eos is 5 (from hf_config); no stop_token_ids are needed.
   - For TTS, validate on message.audio.data. The transcript/content
@@ -69,6 +75,7 @@ def build_payload(args) -> dict:
             "model": args.model,
             "messages": messages,
             "max_tokens": args.max_tokens,
+            "chat_template_kwargs": {"mode": mode},
             "mm_processor_kwargs": {"mode": mode},
             "vllm_xargs": vllm_xargs,
         }
@@ -84,6 +91,7 @@ def build_payload(args) -> dict:
             "model": args.model,
             "messages": messages,
             "max_tokens": args.max_tokens,
+            "chat_template_kwargs": {"mode": mode},
             "mm_processor_kwargs": {"mode": mode},
             "vllm_xargs": {"mode": mode},
         }
@@ -95,6 +103,7 @@ def build_payload(args) -> dict:
             "model": args.model,
             "messages": messages,
             "max_tokens": args.max_tokens,
+            "chat_template_kwargs": {"mode": mode},
             "mm_processor_kwargs": {"mode": mode},
             "vllm_xargs": {"mode": mode},
         }
