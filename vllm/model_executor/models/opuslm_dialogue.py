@@ -130,7 +130,7 @@ class _OpusLMDialogueAudioInputProcessor:
         logger.info("Loaded DAC encoder on %s", self.device)
         return self._dac_model
 
-    def _resolve_xeus_paths(self) -> tuple[str, str]:
+    def _resolve_xeus_paths(self) -> tuple[str, str, str]:
         from huggingface_hub import hf_hub_download
 
         repo = self.cfg.xeus_hf_model_tag
@@ -138,10 +138,15 @@ class _OpusLMDialogueAudioInputProcessor:
             self.cfg, "xeus_checkpoint_filename", "model/xeus_checkpoint_new.pth"
         )
         km_file = self.cfg.km_model_filename
+        config_file = getattr(self.cfg, "xeus_config_filename", "model/config.yaml")
 
         ckpt_path = hf_hub_download(repo, ckpt_file)
         km_path = hf_hub_download(repo, km_file)
-        return ckpt_path, km_path
+        # SSLTask.build_model_from_file(None, ckpt) falls back to a config.yaml
+        # sitting next to the checkpoint, and hf_hub_download materialises only
+        # the files it is asked for. Fetch the config and pass it explicitly.
+        config_path = hf_hub_download(repo, config_file)
+        return ckpt_path, km_path, config_path
 
     def _load_ssl_and_kmeans(self):
         if self._ssl_model is not None and self._kmeans_model is not None:
@@ -156,9 +161,9 @@ class _OpusLMDialogueAudioInputProcessor:
                 "Please install required ESPnet dependencies."
             ) from e
 
-        ckpt_path, km_path = self._resolve_xeus_paths()
+        ckpt_path, km_path, config_path = self._resolve_xeus_paths()
         self._ssl_model, _ = SSLTask.build_model_from_file(
-            None, ckpt_path, device=str(self.device)
+            config_path, ckpt_path, device=str(self.device)
         )
         self._ssl_model.eval()
         # Disable masking so encode() produces deterministic features
@@ -369,6 +374,12 @@ class OpusLMDialogueMultiModalProcessor(
                 f"Unsupported task '{task}'. "
                 f"Supported: {', '.join(task_aliases.keys())}."
             )
+
+        # Clients send the dialogue direction as `mode`, not `task`, and the
+        # two mode names are spelled exactly like the aliases above.
+        mode_norm = mode.strip().lower() if isinstance(mode, str) else None
+        if mode_norm in task_aliases:
+            return task_aliases[mode_norm]
 
         # Default: audio_dialogue
         return cfg.audio_dialogue_task_token_id
@@ -1638,7 +1649,13 @@ class OpusLMDialogueForConditionalGeneration(
                 multimodal_embeddings=multimodal_embeddings,
                 is_multimodal=is_multimodal,
             )
-            has_real_streams |= is_multimodal
+            # The runner builds is_multimodal as a pinned CPU tensor on
+            # purpose (_gather_mm_embeddings in gpu_model_runner), because
+            # inputs_embeds[cpu_mask] = ... skips a D2H sync. Combining it
+            # with a device-resident mask still needs an explicit copy.
+            has_real_streams |= is_multimodal.to(
+                has_real_streams.device, non_blocking=True
+            )
 
         # ----- Decode: inject stream1-8 from per-request buffers -----
         if self._stream_buffer_dict:
@@ -1647,7 +1664,9 @@ class OpusLMDialogueForConditionalGeneration(
                 inputs_embeds, applied_mask = self._apply_stream_embeddings(
                     input_ids, inputs_embeds, stream_embed_positions
                 )
-                has_real_streams |= applied_mask
+                has_real_streams |= applied_mask.to(
+                    has_real_streams.device, non_blocking=True
+                )
 
         # ----- Re-prefill: replay stream history for preempted audio -----
         # When a request in audio phase is preempted and re-prefilled,

@@ -19,6 +19,7 @@ Architecture differences from SpeechLM (Bagpiper):
 """
 
 import math
+import os
 import uuid as _uuid
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
@@ -67,9 +68,14 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.processing.processor import MultiModalProcessingInfo
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.opuslm import OpusLMConfig
+from vllm.transformers_utils.configs.opuslm import OpusLMConfig, OpusLMTaskLayout
 
 logger = init_logger(__name__)
+
+# Same switch the v1 engine reads (vllm/v1/worker/gpu_model_runner.py and
+# vllm/v1/core/sched/utils.py). Set VLLM_ESPNET_AUDIO_DEBUG=1 to trace the
+# audio phase machine and the codec token windows.
+ESPNET_AUDIO_DEBUG = os.environ.get("VLLM_ESPNET_AUDIO_DEBUG", "0") == "1"
 
 _AUDIO_SAMPLING_RATE = 16000
 
@@ -122,7 +128,7 @@ class _OpusLMAudioInputProcessor:
         ).model.eval()
         return self._dac_model
 
-    def _resolve_xeus_paths(self) -> tuple[str, str]:
+    def _resolve_xeus_paths(self) -> tuple[str, str, str]:
         from huggingface_hub import hf_hub_download
 
         repo = self.cfg.xeus_hf_model_tag
@@ -130,10 +136,15 @@ class _OpusLMAudioInputProcessor:
             self.cfg, "xeus_checkpoint_filename", "model/xeus_checkpoint_new.pth"
         )
         km_file = self.cfg.km_model_filename
+        config_file = getattr(self.cfg, "xeus_config_filename", "model/config.yaml")
 
         ckpt_path = hf_hub_download(repo, ckpt_file)
         km_path = hf_hub_download(repo, km_file)
-        return ckpt_path, km_path
+        # SSLTask.build_model_from_file(None, ckpt) falls back to a config.yaml
+        # sitting next to the checkpoint, and hf_hub_download materialises only
+        # the files it is asked for. Fetch the config and pass it explicitly.
+        config_path = hf_hub_download(repo, config_file)
+        return ckpt_path, km_path, config_path
 
     def _load_ssl_and_kmeans(self):
         if self._ssl_model is not None and self._kmeans_model is not None:
@@ -148,9 +159,9 @@ class _OpusLMAudioInputProcessor:
                 "Please install required ESPnet dependencies (e.g. torch_complex)."
             ) from e
 
-        ckpt_path, km_path = self._resolve_xeus_paths()
+        ckpt_path, km_path, config_path = self._resolve_xeus_paths()
         self._ssl_model, _ = SSLTask.build_model_from_file(
-            None, ckpt_path, device="cpu"
+            config_path, ckpt_path, device="cpu"
         )
         self._ssl_model.eval()
         # Disable masking so encode() produces deterministic features
@@ -279,12 +290,13 @@ class _OpusLMGPUAudioInputProcessor:
         logger.info("Loaded DAC encoder on %s", self.device)
         return self._dac_model
 
-    def _resolve_xeus_paths(self) -> tuple[str, str]:
+    def _resolve_xeus_paths(self) -> tuple[str, str, str]:
         import os
         # Support local paths: if xeus_local_checkpoint / km_local_path
         # are set and point to existing files, use them directly.
         local_ckpt = getattr(self.cfg, "xeus_local_checkpoint", None)
         local_km = getattr(self.cfg, "km_local_path", None)
+        local_config = getattr(self.cfg, "xeus_local_config", None)
         if local_ckpt and os.path.isfile(local_ckpt):
             ckpt_path = local_ckpt
         else:
@@ -301,7 +313,19 @@ class _OpusLMGPUAudioInputProcessor:
             from huggingface_hub import hf_hub_download
             repo = self.cfg.xeus_hf_model_tag
             km_path = hf_hub_download(repo, self.cfg.km_model_filename)
-        return ckpt_path, km_path
+        # SSLTask.build_model_from_file(None, ckpt) falls back to a config.yaml
+        # sitting next to the checkpoint, and hf_hub_download materialises only
+        # the files it is asked for. Fetch the config and pass it explicitly.
+        if local_config and os.path.isfile(local_config):
+            config_path = local_config
+        else:
+            from huggingface_hub import hf_hub_download
+            repo = self.cfg.xeus_hf_model_tag
+            config_file = getattr(
+                self.cfg, "xeus_config_filename", "model/config.yaml"
+            )
+            config_path = hf_hub_download(repo, config_file)
+        return ckpt_path, km_path, config_path
 
     def _load_ssl_and_kmeans(self):
         if self._ssl_model is not None and self._kmeans_model is not None:
@@ -314,9 +338,9 @@ class _OpusLMGPUAudioInputProcessor:
                 "Failed to import SSL dependencies (joblib/espnet2.tasks.ssl). "
                 "Please install required ESPnet dependencies."
             ) from e
-        ckpt_path, km_path = self._resolve_xeus_paths()
+        ckpt_path, km_path, config_path = self._resolve_xeus_paths()
         self._ssl_model, _ = SSLTask.build_model_from_file(
-            None, ckpt_path, device=str(self.device)
+            config_path, ckpt_path, device=str(self.device)
         )
         self._ssl_model.eval()
         # Disable masking so encode() produces deterministic features
@@ -486,68 +510,11 @@ class OpusLMMultiModalProcessor(
           - Plain TTS -> <codec_ssl_plain_tts_task>
           - Text LM -> <textlm_task>
         """
-        if isinstance(task, int):
-            return int(task)
-
-        task_aliases = {
-            "asr": cfg.codec_ssl_asr_task_token_id,
-            "codec_ssl_asr": cfg.codec_ssl_asr_task_token_id,
-            "codec_ssl_asr_task": cfg.codec_ssl_asr_task_token_id,
-            "tts": cfg.codec_ssl_tts_task_token_id,
-            "codec_ssl_tts": cfg.codec_ssl_tts_task_token_id,
-            "codec_ssl_tts_task": cfg.codec_ssl_tts_task_token_id,
-            "plain_tts": cfg.codec_ssl_plain_tts_task_token_id,
-            "codec_ssl_plain_tts": cfg.codec_ssl_plain_tts_task_token_id,
-            "codec_ssl_plain_tts_task": cfg.codec_ssl_plain_tts_task_token_id,
-            "textlm": cfg.textlm_task_token_id,
-            "text_lm": cfg.textlm_task_token_id,
-            "olmo_textlm": cfg.textlm_task_token_id,
-            "textlm_task": cfg.textlm_task_token_id,
-            # Dialogue tasks
-            "audio_dialogue": cfg.audio_dialogue_task_token_id,
-            "audio_dialogue_task": cfg.audio_dialogue_task_token_id,
-            "text_dialogue": cfg.text_dialogue_task_token_id,
-            "text_dialogue_task": cfg.text_dialogue_task_token_id,
-        }
-        if isinstance(task, str):
-            task_norm = task.strip().lower()
-            if task_norm in task_aliases:
-                return task_aliases[task_norm]
-            raise ValueError(
-                f"Unsupported OpusLM task '{task}'. "
-                "Supported: asr, tts, plain_tts, textlm, "
-                "audio_dialogue, text_dialogue."
-            )
-
-        mode_norm = mode.strip().lower() if isinstance(mode, str) else None
-        if mode_norm is not None and mode_norm not in (
-            "text_audio",
-            "audio_text",
-            "text_text",
-            "audio_dialogue",
-            "text_dialogue",
-        ):
-            raise ValueError(
-                f"Unsupported OpusLM mode '{mode}'. "
-                "Supported: text_audio, audio_text, text_text, "
-                "audio_dialogue, text_dialogue."
-            )
-
-        if mode_norm == "audio_dialogue":
-            return cfg.audio_dialogue_task_token_id
-        if mode_norm == "text_dialogue":
-            return cfg.text_dialogue_task_token_id
-        if mode_norm == "audio_text":
-            return cfg.codec_ssl_asr_task_token_id
-        if mode_norm == "text_text":
-            return cfg.textlm_task_token_id
-        if mode_norm == "text_audio":
-            if has_audio_input:
-                return cfg.codec_ssl_tts_task_token_id
-            return cfg.codec_ssl_plain_tts_task_token_id
-        if has_audio_input:
-            return cfg.codec_ssl_asr_task_token_id
-        return cfg.codec_ssl_plain_tts_task_token_id
+        return OpusLMTaskLayout.from_config(cfg).resolve_task_token_id(
+            has_audio_input=has_audio_input,
+            mode=mode,
+            task=task,
+        )
 
     @staticmethod
     def _set_input_ids(
@@ -595,45 +562,14 @@ class OpusLMMultiModalProcessor(
         if input_ids.ndim != 2 or input_ids.shape[0] != 1:
             return text_inputs
 
-        sos = int(getattr(cfg, "sos_eos_token_id", cfg.eos_token_id))
-        body_ids = input_ids[0].tolist()
-
-        known_task_ids = {
-            int(cfg.textlm_task_token_id),
-            int(cfg.codec_ssl_asr_task_token_id),
-            int(cfg.codec_ssl_tts_task_token_id),
-            int(getattr(cfg, "codec_ssl_plain_tts_task_token_id", 82)),
-            int(getattr(cfg, "codec_ssl_audiolm_task_token_id", 83)),
-        }
-        if len(body_ids) >= 2 and body_ids[0] == sos and body_ids[1] in known_task_ids:
-            body_ids = body_ids[2:]
-
-        seq = [sos, int(task_token_id)] + body_ids
-        tts_task_ids = {
-            int(cfg.codec_ssl_tts_task_token_id),
-            int(getattr(cfg, "codec_ssl_plain_tts_task_token_id", 82)),
-        }
-
-        if task_token_id in tts_task_ids:
-            # NOTE: the OpusLMTokenizer already shifts text IDs by
-            # +text_token_start (13448) during encode/call, so body_ids
-            # arriving here are already in the model's global ID space.
-            # Do NOT apply the offset again.
-
-            # Condition segment: <text_bpe_start/end> + text payload.
-            if len(body_ids) == 0 or body_ids[0] != cfg.text_bpe_start_end_token_id:
-                seq = [sos, int(task_token_id), cfg.text_bpe_start_end_token_id] + body_ids
-            # Inter-segment padding after text condition (ESPnet: nq-1 = 8
-            # zero frames to prevent DAC overlap after delay interleaving).
-            inter_pad = int(getattr(cfg, "nq", 9)) - 1  # 8
-            seq.extend([0] * inter_pad)
-            # Target segment prefix: <codec_ssl_start/end>.
-            if seq[-1] != cfg.codec_ssl_start_end_token_id:
-                seq.append(cfg.codec_ssl_start_end_token_id)
-        elif task_token_id == int(cfg.codec_ssl_asr_task_token_id):
-            # Target text segment prefix.
-            if seq[-1] != cfg.text_bpe_start_end_token_id:
-                seq.append(cfg.text_bpe_start_end_token_id)
+        # NOTE: text IDs arriving here were already shifted by
+        # +text_token_start (13448) by OpusLMTokenizer during encode, so they
+        # are in the model's global ID space. Do NOT apply the offset again.
+        # `apply` strips any layout the tokenizer already produced before
+        # rebuilding it, so this is safe to run on an already-laid-out prompt.
+        seq = OpusLMTaskLayout.from_config(cfg).apply(
+            input_ids[0].tolist(), task_token_id
+        )
 
         new_input_ids = torch.tensor(
             [seq],
@@ -1909,9 +1845,13 @@ class OpusLMForConditionalGeneration(
         # already have the correct stream embeddings. Add bias to the rest.
         handled = torch.zeros_like(input_ids, dtype=torch.bool)
         if mm_positions is not None:
-            handled |= mm_positions
+            # The runner builds is_multimodal as a pinned CPU tensor on
+            # purpose (_gather_mm_embeddings in gpu_model_runner), because
+            # inputs_embeds[cpu_mask] = ... skips a D2H sync. Combining it
+            # with a device-resident mask still needs an explicit copy.
+            handled |= mm_positions.to(handled.device, non_blocking=True)
         if stream_positions is not None:
-            handled |= stream_positions
+            handled |= stream_positions.to(handled.device, non_blocking=True)
         needs_bias = ~handled
         if needs_bias.any():
             nq_minus_1 = int(getattr(self.config, "nq", 9)) - 1  # 8
@@ -2419,6 +2359,25 @@ class OpusLMForConditionalGeneration(
         result = dac_tokens.clone()
         for k in range(cfg.num_codec_streams):
             offset = cfg.codec_token_start + k * cfg.codec_per_stream_size
+            if ESPNET_AUDIO_DEBUG:
+                # Each stream owns a 1024-wide window of the vocabulary. The
+                # clamp below is silent, so a stream sampling outside its own
+                # window would turn into a wall of index 0 or 1023 and still
+                # produce a well-formed but meaningless waveform. Report the
+                # escape rate rather than let that hide.
+                col = dac_tokens[..., k]
+                outside = ((col < offset) | (col >= offset + 1024)).sum()
+                logger.info(
+                    "[espnet-codec] stream=%d window=[%d,%d) min=%d max=%d "
+                    "outside=%d/%d",
+                    k + 1,
+                    offset,
+                    offset + 1024,
+                    int(col.min()),
+                    int(col.max()),
+                    int(outside),
+                    col.numel(),
+                )
             result[..., k] = (result[..., k] - offset).clamp(0, 1023)
         return result
 
