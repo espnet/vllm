@@ -254,8 +254,10 @@ CUDA_VISIBLE_DEVICES=2 MODEL_PATH=~/ckpt/vLLM_alm/OpusLM_dialogue \
   执行器，服务能起来、能出文本，但会静默地不返回音频。所以脚本在检测到
   这个变量不是 0 时直接退出，宁可起不来也不给你一个半残的服务。
 - `--no-async-scheduling`。v0.28.0 的异步调度默认开，脚本默认关，因为音
-  频这条路是在关掉的配置下验证的。想用上游默认值就设
-  `ASYNC_SCHEDULING=1`（这个组合没有实测过）。
+  频这条路上的验证绝大部分都是在关掉的配置下做的。想用上游默认值就设
+  `ASYNC_SCHEDULING=1`，opuslm 的 TTS 在这个组合下实测过：两边的 token
+  计数和输出 WAV 逐字节相同，见第三节。其余路径没有逐条在开启的配置下
+  复测。
 
 ### 4. 调客户端
 
@@ -343,11 +345,15 @@ python client_bagpiper.py --task tts_cfg --cfg 3.0 \
 python client_opuslm.py --task tts --prompt "Hello world" --out tts.wav
 ```
 
-实测：`finish_reason: stop`，22 个 prompt token、281 个 completion token，
-`audio: 5.42s @ 16000 Hz, 1 ch`。
+实测：`finish_reason: stop`，14 个 prompt token、68 个 completion token，
+`audio: 1.16s @ 16000 Hz, 1 ch`。
 
-281 这个数字可以自己验：271 步音频加 8 步 flush 加 2 步收尾。271 帧除以
-50 Hz 是 5.42 秒，和 WAV 的时长一致。
+68 这个数字可以自己验：58 步音频加 8 步 flush 加 2 步收尾。58 帧除以
+50 Hz 是 1.16 秒，和 WAV 的时长一致。
+
+这一条在两个互相独立的服务进程里各跑一次（一次开 async scheduling，一次
+关），两份 WAV 逐字节相同，md5 都是 `9f4a1ee1225c1c8ef435e0ae82a49f0c`。
+所以相同输入的音频输出是可复现的，尽管采样温度是 0.8 且没有传 `--seed`。
 
 ### opuslm：声音克隆 TTS
 
@@ -364,7 +370,14 @@ python client_opuslm.py --task tts --prompt "Hello world" \
 python client_opuslm.py --task asr --audio test.wav
 ```
 
-实测：53 个 completion token，转写准确，`audio: (none)`。
+实测：810 个 prompt token、45 个 completion token，`audio: (none)`。输入是
+一段 15.95 秒的英语朗读，转写出来的是：
+
+```
+He heard first words I spoke in the original phonograph a little piece of
+practical poetry. Mary had a little lamb, it reared quite a spell, and
+everywhere that Mary went, the lamb was sure to go.
+```
 
 ### opuslm：纯文本续写
 
@@ -372,7 +385,12 @@ python client_opuslm.py --task asr --audio test.wav
 python client_opuslm.py --task textlm --prompt "Once upon a time"
 ```
 
-实测：277 个 completion token。开头连贯，往后会退化，见第六节。
+实测：6 个 prompt token、2048 个 completion token，`finish_reason: length`。
+开头几句连贯（"the man in the moon got married. And now, in very tiny
+letters, the wise sage of the land added…"），往后越来越散，最后退化成一个
+词无限重复，一直撞到 token 上限才停。开着 tracer 能看到这个退化在 token
+层面就是两个 id 在交替：`token=14508` 和 `token=13459` 反复出现。这是
+checkpoint 本身的问题，不是这个 port 的缺陷，第六节有说明。
 
 ### opuslm_dialogue：语音对话
 
@@ -497,6 +515,11 @@ chat template 的改写单独验过：把参考的 `tokenizer_config.json.orig` 
 **推理**：三个模型九条路径全部在 H100 上真实跑过，结果见第三节。用的是
 仓库里的参考客户端，不是绕过客户端的私有脚本。
 
+opuslm 那三条路径（TTS、ASR、textlm）的数字是在最后一个代码提交上重测
+的。早先那一轮跑在 chat template 修好之前，模板里的 `<|user|>` 会被当普通
+文本编码进 prompt，token 计数和生成长度都不一样，所以旧数字已经不适用于
+现在这份代码。第三节写的是重测的结果。
+
 **其他实测过的点**：
 
 - 两个 codec 在真实权重上的编解码往返（CPU）通过。
@@ -510,6 +533,18 @@ chat template 的改写单独验过：把参考的 `tokenizer_config.json.orig` 
   `f4d0640e406ee55c7987c5cfc414c015`）。换一段输入音频，结果就变
   （md5 `5cfdc5135b97fc91672885756523460b`，时长 8.02 秒对 15.08 秒）。
   所以这是可复现的采样，不是写死的输出。
+- 异步调度试过一条路径。opuslm 的 TTS 在 `ASYNC_SCHEDULING=1`（上游默认）
+  和 `ASYNC_SCHEDULING=0`（脚本默认）下各跑一次，prompt token、completion
+  token、音频时长三个数字完全一样，两份 WAV 的 md5 也一样
+  （`9f4a1ee1225c1c8ef435e0ae82a49f0c`）。开着异步调度时相位机、EOS 推迟
+  和逐流采样都正常工作。其余八条路径没有在异步调度下逐条复测。
+- 三个 tracer 在最后一个代码提交上都出过东西。`[espnet-stop]` 打出
+  `n_out=59 … defer=True` 然后 `n_out=68 … defer=False`，正好差 9 步，和
+  `delay_steps=8` 对得上；同一行还打出 `prompt_head=[5, 82, 35]`，这就是
+  ESPnet 要的那个布局（sos/eos、纯 TTS 的 task token、text_bpe_start）。
+  ASR 请求打的是 `prompt_head=[5, 80, 34] … is_tts=False defer=False`，
+  换成了 ASR 的 task token 和 codec_ssl_start。`[espnet-codec]` 打出 8 条
+  流全部 `outside=0/58`。
 
 **测试**：单元测试只能在装了 transformers 5 的环境里跑。本地机器上是
 transformers 4，`vllm/transformers_utils/config.py` 会直接抛
@@ -582,10 +617,16 @@ prompt 的写法是个弱得多的杠杆：不带 system message 时，四种不
 
 这一条排查过，**不是移植引入的缺陷**。逐一排除了七个独立的结构性原因之
 后确认音频输出通路机械上是正确的：偏移量往返精确、逐流反交织精确、
-`[espnet-codec]` 显示 8 条流的 token 全部落在合法区间（`outside=0/271`）、
-相位统计与 token 数自洽、codec 在真实权重上的往返通过。opuslm 的 textlm
-和 opuslm_dialogue 的文本输出也有同样的退化特征——开头连贯，往后变差——
-这指向 checkpoint 本身，不指向服务化。
+`[espnet-codec]` 显示 8 条流的 token 全部落在合法区间（最后一次实测是
+`outside=0/58`，8 条流全部如此）、相位统计与 token 数自洽、codec 在真实权
+重上的往返通过。opuslm 的 textlm 和 opuslm_dialogue 的文本输出也有同样的
+退化特征——开头连贯，往后变差——这指向 checkpoint 本身，不指向服务化。
+
+textlm 那条路上这个退化最容易看清楚：开 tracer 跑
+`--task textlm --prompt "Once upon a time"`，日志里会看到 `token=14508`
+和 `token=13459` 两个 id 一直交替下去，直到撞上 token 上限。模型进了一个
+两个 token 的循环，这是语言模型自身的退化，和 codec、相位机、EOS 推迟都
+没有关系。
 
 ### 音频不支持流式
 
