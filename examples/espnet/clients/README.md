@@ -19,12 +19,18 @@ python client_bagpiper.py --task audio_understand \
 
 # TTS: text segment + audio segment (no stop_token_ids)
 python client_bagpiper.py --task tts \
-    --prompt "Read this aloud in a calm voice." --out tts.wav
+    --prompt "Read this aloud in a calm voice: The quick brown fox \
+jumps over the lazy dog." --out tts.wav
 
 # TTS with classifier-free guidance (server creates a shadow request)
 python client_bagpiper.py --task tts_cfg --cfg 3.0 \
-    --prompt "Read this aloud in a calm voice." --out tts_cfg.wav
+    --prompt "A dog barking twice in a quiet room." --out tts_cfg.wav
 ```
+
+`tts` and `tts_cfg` default `--system` to `You are a helpful assistant.`
+Keep it. Bagpiper picks its own output mode, and the system message is
+what makes it render audio instead of answering with text alone —
+measured 7/8 requests with it, 0/8 without. `--system ''` opts out.
 
 ## client_opuslm.py
 
