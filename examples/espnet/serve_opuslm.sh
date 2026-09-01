@@ -78,6 +78,11 @@ for ((i = 0; i < ${#EXTRA_ARGS[@]}; i++)); do
   fi
 done
 
+# Preflight: the `vllm` on PATH has to be this fork, or the model is unknown.
+# shellcheck source=examples/espnet/preflight.sh
+source "${SCRIPT_DIR}/preflight.sh"
+espnet_require_fork "$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+
 # Preflight: fail early with clear diagnostics if port is occupied.
 if command -v lsof >/dev/null 2>&1; then
   if lsof -nP -iTCP:"${PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
