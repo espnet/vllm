@@ -17,20 +17,36 @@ python client_bagpiper.py --task text --prompt "What is 2+2?"
 python client_bagpiper.py --task audio_understand \
     --audio /path/to/test.wav --prompt "What sound is in this audio?"
 
-# TTS: text segment + audio segment (no stop_token_ids)
-python client_bagpiper.py --task tts \
-    --prompt "Read this aloud in a calm voice: The quick brown fox \
-jumps over the lazy dog." --out tts.wav
+# Audio generation: text segment + audio segment (no stop_token_ids).
+# The built-in default prompt is already an in-distribution example.
+python client_bagpiper.py --task tts --out tts.wav
 
-# TTS with classifier-free guidance (server creates a shadow request)
-python client_bagpiper.py --task tts_cfg --cfg 3.0 \
-    --prompt "A dog barking twice in a quiet room." --out tts_cfg.wav
+# To make it say a specific line, DESCRIBE THE SCENE and quote the line.
+python client_bagpiper.py --task tts --out tts.wav \
+    --prompt "A calm male voice, close-miked in a quiet studio, says: \
+'Your package will arrive on Tuesday.' No background noise."
+
+# Same, with classifier-free guidance (server creates a shadow request)
+python client_bagpiper.py --task tts_cfg --cfg 3.0 --out tts_cfg.wav
 ```
 
-`tts` and `tts_cfg` default `--system` to `You are a helpful assistant.`
-Keep it. Bagpiper picks its own output mode, and the system message is
-what makes it render audio instead of answering with text alone —
-measured 7/8 requests with it, 0/8 without. `--system ''` opts out.
+**Bagpiper is not a text-to-speech engine.** It is a descriptive audio
+generator: its training data phrases every request as a natural-language
+description of a scene, with any spoken content quoted inside that
+description. A `"Read this aloud: <sentence>"` instruction is out of
+distribution — it still returns audio, but the audio is not a faithful
+reading of the sentence. That mistake produced a whole batch of
+unintelligible samples before it was caught.
+
+`tts` and `tts_cfg` therefore default `--system` to `DEFAULT_TTS_SYSTEM`,
+the constant 364-char audio-generation system prompt that every sampled
+entry of the training data carries. Keep it — it is what puts the model
+into think-then-describe-then-render mode. `--system ''` opts out.
+
+Validated 2026-09-02 against the release checkpoint on an H100: 5/5
+requests returned audio, all `finish_reason=stop`, and speaking rates of
+2.78/3.06/2.84 words per second where measurable. Evidence in
+`terminal_docs/audio_samples/bagpiper_authoritative_validation/`.
 
 ## client_opuslm.py
 

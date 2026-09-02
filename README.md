@@ -1,110 +1,109 @@
-<!-- markdownlint-disable MD001 MD041 -->
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/assets/logos/vllm-logo-text-dark.png">
-    <img alt="vLLM" src="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/assets/logos/vllm-logo-text-light.png" width=55%>
-  </picture>
-</p>
+# vLLM + ESPnet audio language models
 
-<h3 align="center">
-Easy, fast, and cheap LLM serving for everyone
-</h3>
+A fork of [vLLM](https://github.com/vllm-project/vllm) that adds serving support
+for three ESPnet speech models: **bagpiper**, **opuslm**, and
+**opuslm_dialogue**. Everything else is upstream vLLM, unmodified.
 
-<p align="center">
-| <a href="https://docs.vllm.ai"><b>Documentation</b></a> | <a href="https://blog.vllm.ai/"><b>Blog</b></a> | <a href="https://arxiv.org/abs/2309.06180"><b>Paper</b></a> | <a href="https://x.com/vllm_project"><b>Twitter/X</b></a> | <a href="https://discuss.vllm.ai"><b>User Forum</b></a> | <a href="https://slack.vllm.ai"><b>Developer Slack</b></a> |
-</p>
+> This is a modified fork, not an official vLLM release. Upstream's own README is
+> preserved verbatim at [README.vllm.md](README.vllm.md).
 
-🔥 We have built a vLLM website to help you get started with vLLM. Please visit [vllm.ai](https://vllm.ai) to learn more.
-For events, please visit [vllm.ai/events](https://vllm.ai/events) to join us.
+## Versions
 
----
+|  |  |
+| --- | --- |
+| Upstream base | vLLM **v0.28.0**, tag commit `2cf0a6915ce544dc493a0990f2ea38d81601128a` (2026-08-23) |
+| This branch | `espnet-audio-v0.28.0` — 15 commits on top of that tag |
+| Docker base image | `vllm/vllm-openai:v0.28.0` |
 
-## About
+The three model implementations are Python-only, so compiled kernels come
+straight from the upstream v0.28.0 wheel.
 
-vLLM is a fast and easy-to-use library for LLM inference and serving.
+## The models
 
-Originally developed in the [Sky Computing Lab](https://sky.cs.berkeley.edu) at UC Berkeley, vLLM has grown into one of the most active open-source AI projects built and maintained by a diverse community of many dozens of academic institutions and companies from over 2000 contributors.
+| name | backbone | what it does |
+| --- | --- | --- |
+| `bagpiper` | Qwen3-8B + Qwen3-Omni audio tower + Xcodec | text and audio generation from a described scene; 8 codec streams, optional CFG |
+| `opuslm` | OLMo-2-7B | TTS, ASR, text LM |
+| `opuslm_dialogue` | SmolLM2-1.7B | spoken dialogue |
 
-vLLM is fast with:
+Use those exact names for `--served-model-name`, and make sure `config.json`
+declares the matching `model_type`.
 
-- State-of-the-art serving throughput
-- Efficient management of attention key and value memory with [**PagedAttention**](https://blog.vllm.ai/2023/06/20/vllm.html)
-- Continuous batching of incoming requests, chunked prefill, prefix caching
-- Fast and flexible model execution with piecewise and full CUDA/HIP graphs
-- Quantization: FP8, MXFP8/MXFP4, NVFP4, INT8, INT4, GPTQ/AWQ, GGUF, compressed-tensors, ModelOpt, TorchAO, and [more](https://docs.vllm.ai/en/latest/features/quantization/index.html)
-- Optimized attention kernels including FlashAttention, FlashInfer, TRTLLM-GEN, FlashMLA, and Triton
-- Optimized GEMM/MoE kernels for various precisions using CUTLASS, TRTLLM-GEN, CuTeDSL
-- Speculative decoding including n-gram, suffix, EAGLE, DFlash
-- Automatic kernel generation and graph-level transformations using torch.compile
-- Disaggregated prefill, decode, and encode
-
-vLLM is flexible and easy to use with:
-
-- Seamless integration with popular Hugging Face models
-- High-throughput serving with various decoding algorithms, including *parallel sampling*, *beam search*, and more
-- Tensor, pipeline, data, expert, and context parallelism for distributed inference
-- Streaming outputs
-- Generation of structured outputs using xgrammar or guidance
-- Tool calling and reasoning parsers
-- OpenAI-compatible API server, plus Anthropic Messages API and gRPC support
-- Efficient multi-LoRA support for dense and MoE layers
-- Support for NVIDIA GPUs, AMD GPUs, Intel GPUs, and x86/ARM/PowerPC CPUs. Additionally, diverse hardware plugins such as Google TPUs, Intel Gaudi, IBM Spyre, Huawei Ascend, Rebellions NPU, Apple Silicon, MetaX GPU, and more.
-
-vLLM seamlessly supports 200+ model architectures on Hugging Face, including:
-
-- Decoder-only LLMs (e.g., Llama, Qwen, Gemma)
-- Mixture-of-Expert LLMs (e.g., Mixtral, DeepSeek-V3, Qwen-MoE, GPT-OSS)
-- Hybrid attention and state-space models (e.g., Mamba, Qwen3.5)
-- Multi-modal models (e.g., LLaVA, Qwen-VL, Pixtral)
-- Embedding and retrieval models (e.g., E5-Mistral, GTE, ColBERT)
-- Reward and classification models (e.g., Qwen-Math)
-
-Find the full list of supported models [here](https://docs.vllm.ai/en/latest/models/supported_models.html).
-
-## Getting Started
-
-Install vLLM with [`uv`](https://docs.astral.sh/uv/) (recommended) or `pip`:
+## Quickstart
 
 ```bash
-uv pip install vllm
+# 1. ESPnet/DeepSpeed checkpoint -> HF-style directory
+python examples/espnet/convert/convert_bagpiper_ckpt.py \
+    /path/to/mp_rank_00_model_states.pt /path/to/out/bagpiper \
+    --ref-dir /path/to/reference/bagpiper-checkpoint
+
+# 2. serve (port 9811; extra args pass through to `vllm serve`)
+MODEL_PATH=/path/to/out/bagpiper bash examples/espnet/serve_bagpiper.sh
+
+# 3. request
+python examples/espnet/clients/client_bagpiper.py --task tts --out demo.wav
 ```
 
-Or [build from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source) for development.
+`opuslm` and `opuslm_dialogue` follow the same three steps with
+`convert_opuslm_ckpt.py`, `serve_opuslm.sh` / `serve_opuslm_dialogue.sh`, and
+`client_opuslm.py` / `client_opuslm_dialogue.py`.
 
-Visit our [documentation](https://docs.vllm.ai/en/latest/) to learn more.
+## Bagpiper takes a scene description, not a sentence to read
 
-- [Installation](https://docs.vllm.ai/en/latest/getting_started/installation.html)
-- [Quickstart](https://docs.vllm.ai/en/latest/getting_started/quickstart.html)
-- [List of Supported Models](https://docs.vllm.ai/en/latest/models/supported_models.html)
+This is the one thing that trips people up. Bagpiper is **not** a text-to-speech
+engine. Describe the audio you want, and quote any spoken line inside that
+description:
 
-## Contributing
-
-We welcome and value any contributions and collaborations.
-Please check out [Contributing to vLLM](https://docs.vllm.ai/en/latest/contributing/index.html) for how to get involved.
-
-## Citation
-
-If you use vLLM for your research, please cite our [paper](https://arxiv.org/abs/2309.06180):
-
-```bibtex
-@inproceedings{kwon2023efficient,
-  title={Efficient Memory Management for Large Language Model Serving with PagedAttention},
-  author={Woosuk Kwon and Zhuohan Li and Siyuan Zhuang and Ying Sheng and Lianmin Zheng and Cody Hao Yu and Joseph E. Gonzalez and Hao Zhang and Ion Stoica},
-  booktitle={Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles},
-  year={2023}
-}
+```bash
+python examples/espnet/clients/client_bagpiper.py --task tts --out demo.wav \
+    --prompt "A calm male voice, close-miked in a quiet studio, says: \
+'Your package will arrive on Tuesday.' No background noise."
 ```
 
-## Contact Us
+Writing `"Read this aloud: <sentence>"` is out of distribution. It still returns
+audio, but not a faithful reading of your sentence — that mistake produced a
+batch of unintelligible samples before it was caught. The client's default
+`--system` is the 364-character audio-generation system prompt the model was
+trained with; keep it.
 
-<!-- --8<-- [start:contact-us] -->
-- For technical questions and feature requests, please use GitHub [Issues](https://github.com/vllm-project/vllm/issues)
-- For discussing with fellow users, please use the [vLLM Forum](https://discuss.vllm.ai)
-- For coordinating contributions and development, please use [Slack](https://slack.vllm.ai)
-- For security disclosures, please use GitHub's [Security Advisories](https://github.com/vllm-project/vllm/security/advisories) feature
-- For collaborations and partnerships, please contact us at [collaboration@vllm.ai](mailto:collaboration@vllm.ai)
-<!-- --8<-- [end:contact-us] -->
+Output of the built-in default prompt (`'Hello, how are you today?'`, 1.80 s,
+16 kHz mono):
+[`examples/espnet/demo_assets/bagpiper_hello_scene.wav`](examples/espnet/demo_assets/bagpiper_hello_scene.wav)
 
-## Media Kit
+## Docker
 
-- If you wish to use vLLM's logo, please refer to [our media kit repo](https://github.com/vllm-project/media-kit)
+[`examples/espnet/docker/`](examples/espnet/docker/README.md) holds a Dockerfile
+deriving from `vllm/vllm-openai:v0.28.0`. **No image has been built or published
+from this repository** — the files were checked statically only. Build it
+yourself, from the repo root:
+
+```bash
+docker build -f examples/espnet/docker/Dockerfile -t espnet-vllm:v0.28.0 .
+```
+
+## What has actually been tested
+
+On H100 80GB (Linux, CUDA 13 driver, Python 3.12), tensor parallel size 1:
+
+- **bagpiper** — validated 2026-09-02 against the release checkpoint with the
+  authoritative prompt format: 5 of 5 audio-generation requests returned audio,
+  all `finish_reason=stop`, implied speaking rates 2.78 / 3.06 / 2.84 words per
+  second where the spoken span was measurable.
+- **opuslm**, **opuslm_dialogue** — TTS, ASR, text-LM and spoken-dialogue paths
+  exercised with token counts and durations recorded in the guide.
+- Docker — **not** built end-to-end; static and config checks only.
+- Not covered: multi-GPU (TP>1), throughput or latency benchmarking, and any
+  formal audio-quality scoring. The recorded checks are measurable properties
+  (duration, sample rate, channels, finish reason, speaking-rate arithmetic),
+  not listening tests.
+
+## More
+
+- [`examples/espnet/GETTING_STARTED.zh.md`](examples/espnet/GETTING_STARTED.zh.md)
+  — the full guide (Chinese): what the models are, conversion details, runnable
+  examples with measured output, Docker on a personal machine, verification
+  status, and known limitations.
+- [`examples/espnet/README.md`](examples/espnet/README.md) — tooling layout.
+- [`README.vllm.md`](README.vllm.md) — upstream vLLM's README, verbatim.
+
+Licensed under Apache-2.0, the same as upstream vLLM. See [LICENSE](LICENSE).

@@ -9,15 +9,26 @@
 #   MODEL_PATH=/path/to/bagpiper bash serve_bagpiper.sh
 #   MODEL_PATH=/path/to/bagpiper PORT=9811 bash serve_bagpiper.sh --tensor-parallel-size 2
 #
-# Client example (text_audio with CFG):
+# Client example (text_audio with CFG).
+#
+# NOTE: upstream scripts/serve_cfg_1.sh carries an abbreviated version of this
+# comment whose system message is "You are a helpful assistant." and whose user
+# turn is a bare "Read this aloud in a calm voice." Do NOT copy that. It is a
+# shortened doc example, not the reference request; the runnable reference
+# client takes both turns from the dataset. Bagpiper is a descriptive audio
+# generator, so the system turn must be the constant audio-generation prompt
+# below and the user turn must describe a scene with any spoken line quoted
+# inside it. Using the abbreviated form is what produced a batch of
+# unintelligible samples. See clients/client_bagpiper.py DEFAULT_TTS_SYSTEM.
+#
 #   curl http://localhost:9811/v1/chat/completions \
 #     -H "Content-Type: application/json" -d '{
 #       "model": "bagpiper",
 #       "messages": [
-#         {"role": "system", "content": "You are a helpful assistant."},
-#         {"role": "user", "content": "Read this aloud in a calm voice."}
+#         {"role": "system", "content": "You are a helpful assistant that generates audio based on user requests. You can create various types of audio including sound effects, music, speech, ambient sounds, and any combination of these. When given a request, first think through what the user wants and how to create high-quality audio, then provide a detailed description of the audio you will generate."},
+#         {"role": "user", "content": "A clear, friendly female voice, close-miked in a quiet room, says: '\''Hello, how are you today?'\''. She speaks at a relaxed, natural pace with a warm tone and no background noise or music."}
 #       ],
-#       "max_tokens": 4096,
+#       "max_tokens": 12000,
 #       "temperature": 0.8,
 #       "top_k": 20,
 #       "vllm_xargs": {

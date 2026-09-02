@@ -11,6 +11,14 @@ Input JSONL (ESPnet triplet format), one example per line:
 Audio content is a file path; the client base64-encodes the raw file
 bytes and sets format from the file suffix.
 
+The Bagpiper SFT data is already in exactly this format -- the
+`filtered_realistic.jsonl` files under a `bagpiper_sft/` tree, for instance.
+They carry the system turn the model was trained with and phrase every request
+as a scene description, which is what Bagpiper expects; assistant turns are
+dropped for audiogen. Do not hand-write "read this aloud: <sentence>" prompts
+into an input file -- see client_bagpiper.py for why that shape is out of
+distribution.
+
 Usage:
     python client_bagpiper_stress.py \
         --audiogen-input /path/to/audiogen.jsonl \

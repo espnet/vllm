@@ -5,7 +5,13 @@ checkpoint 变成一个能收 HTTP 请求、会返回音频的服务。读它不
 这些模型以前在哪个 vLLM 分支上跑过。
 
 代码在分支 `espnet-audio-v0.28.0` 上，基线是上游 tag `v0.28.0`
-（commit `2cf0a6915c`）。
+（commit `2cf0a6915c`）。仓库根目录的 [`README.md`](../../README.md) 是简短
+版总览，这里是完整操作细节。
+
+**先记住一条,后面会反复用到:bagpiper 不是文本转语音引擎。** 它按「场景描述」
+生成音频,要说的话用引号嵌在描述里,例如「A calm male voice says: 'Your
+package will arrive on Tuesday.'」。写成「把这句话读出来:某句话」是训练时
+没有的形状,会返回音频但不是忠实朗读。细节见第三节和第六节。
 
 ---
 
@@ -312,29 +318,45 @@ python client_bagpiper.py --task audio_understand \
 实测：1386 个 completion token，返回一段详细描述，里面既有内容转写也有
 音标转写，`audio: (none)`。
 
-### bagpiper：文本转语音
+### bagpiper：生成音频
+
+**先看清楚一件事:bagpiper 不是文本转语音引擎。** 它是一个按描述生成音频的
+模型。它的训练数据把每一条请求都写成一段自然语言的场景描述,要说的话用引号
+嵌在描述里面。写成「把这句话读出来:某句话」这种指令是训练时没有的形状 ——
+它照样会返回音频,但那段音频不是对这句话的忠实朗读。这个错误曾经导致一整批
+样例听起来含混不清。
+
+客户端内置的默认 prompt 已经是一个符合分布的例子,直接跑就行:
 
 ```bash
-python client_bagpiper.py --task tts \
-    --prompt "Read this aloud in a calm voice: The quick brown fox jumps over the lazy dog." \
-    --out tts.wav
+python client_bagpiper.py --task tts --out tts.wav
 ```
 
-实测：788 个 completion token，`audio: 4.04s @ 16000 Hz, 1 ch`，
-`tts.wav` 129,324 字节。
-
-有意思的是模型在 `<think>` 里会给自己定一个时长目标（那次写的是
-"Generate a 3.9-second audio clip"），渲染出来的 4.04 秒对得上。
-
-### bagpiper：文本转语音加 CFG
+要让它说某一句特定的话,**描述场景,并把那句话放进引号**:
 
 ```bash
-python client_bagpiper.py --task tts_cfg --cfg 3.0 \
-    --prompt "A dog barking twice in a quiet room." --out tts_cfg.wav
+python client_bagpiper.py --task tts --out tts.wav \
+    --prompt "A calm male voice, close-miked in a quiet studio, says: 'Your package will arrive on Tuesday.' No background noise."
 ```
 
-实测：702 个 completion token，`audio: 3.20s @ 16000 Hz, 1 ch`，
-102,444 字节。
+09-02 在 H100 上对着发布用的 checkpoint 实测,默认 prompt
+(`'Hello, how are you today?'` 那一条)出 615 个 completion token、
+`audio: 1.80s @ 16000 Hz, 1 ch`,`finish_reason=stop`,折算语速每秒 2.78 个
+词,落在正常朗读的区间里。同一批里另外两条较长的句子是每秒 3.06 和 2.84 个
+词。证据在 `terminal_docs/audio_samples/bagpiper_authoritative_validation/`。
+
+模型会在 `<think>` 里先给自己定一个时长目标,再渲染,两者通常对得上。
+
+### bagpiper：生成音频加 CFG
+
+```bash
+python client_bagpiper.py --task tts_cfg --cfg 3.0 --out tts_cfg.wav
+```
+
+同一条 prompt 开 CFG 3.0 的对照实测:1016 个 completion token、
+`audio: 7.08s`(那条是较长的场景描述)。注意 CFG 会把两个分支的浮点差异
+按 `main*3.0 + shadow*(1-3.0)` 放大约 7 倍,所以开 CFG 的输出天生比不开
+更不可复现。
 
 `--cfg 1.0` 等价于不开 CFG。开了之后服务端会自动建一条影子请求，这个请
 求的 KV 占用翻倍。
@@ -595,20 +617,37 @@ GPU 上单独复跑这两个文件，结果是 `3 passed, 15 warnings in 57.52s`
   eot 从文本相位切到音频相位的，没有 eot 就没有音频段。这时请求返回没有
   音频是合法行为，不是 bug。
 
-**决定它走哪条路的是 system message。** 实测数据：同一个 prompt、同样的
-采样参数、`max_tokens: 12000`，带
-`{"role": "system", "content": "You are a helpful assistant."}` 的 8 个
-请求里 7 个出音频，不带的 8 个请求里 0 个出音频（Fisher 精确检验
-p≈0.0014）。16 个响应的 `<think>` 块全都完整闭合，所以推理本身不是那个
-区分因素。
+**决定它走哪条路的是 system message,而且只有一个正确的 system message。**
+训练数据里每一条采样到的记录都带着同一段 system prompt(364 个字符,
+md5 `903599715f6bea955adc1cfbf83aa9e2`),来源是
+`bagpiper_sft/sft_part2/filtered_realistic.jsonl` 的 `system` 那一轮,4000 条
+采样里一字不差地一致:
 
-prompt 的写法是个弱得多的杠杆：不带 system message 时，四种不同写法
-（指令加句子、光句子、"Say: ..."、声音描述）一共 16 个请求，出音频 0 个。
+```
+You are a helpful assistant that generates audio based on user requests. You can
+create various types of audio including sound effects, music, speech, ambient
+sounds, and any combination of these. When given a request, first think through
+what the user wants and how to create high-quality audio, then provide a detailed
+description of the audio you will generate.
+```
 
-所以 `client_bagpiper.py` 的 `tts` 和 `tts_cfg` 把 `--system` 默认设成了
-`You are a helpful assistant.`，这也是上游参考客户端每个请求都在发的东西。
-要关掉传 `--system ''`。另外这两个任务的 `--max-tokens` 默认是 12000，和
-参考客户端一致——给小了，`<think>` 加文本段就把预算吃光了，轮不到音频。
+这段话本身就规定了「先想,再描述,然后渲染」这个输出契约 —— 也就是上面那个
+`<think>` 加文本段加 codec 帧的顺序。所以 `client_bagpiper.py` 的 `tts` 和
+`tts_cfg` 把 `--system` 默认设成它(常量 `DEFAULT_TTS_SYSTEM`),要关掉传
+`--system ''`。
+
+**这里曾经有一处错误的说法,现已更正。** 本文档和客户端此前把默认 system
+message 写成 `You are a helpful assistant.`,并声称「这也是上游参考客户端每个
+请求都在发的东西」。这个说法是错的:在上游那份打包材料里,这个字符串只出现
+过一次,在 `scripts/serve_cfg_1.sh` 第 17 行的 `#` 注释块里,是一段被简写过的
+curl 示例。真正可运行的参考客户端 `scripts/client_all.py` 根本没有硬编码任何
+system 轮,它是从数据集里取的,而数据集里永远是上面那一段长 prompt。用错的
+system message 加上「把这句话读出来」这种 prompt,是先前那批样例听起来含混
+不清的原因。
+
+另外这两个任务的 `--max-tokens` 默认是 12000,和参考客户端一致
+(`client_all.py` 第 33 行)——给小了,`<think>` 加文本段就把预算吃光了,
+轮不到音频。
 
 ### opuslm 的 TTS 清晰度不达预期
 
