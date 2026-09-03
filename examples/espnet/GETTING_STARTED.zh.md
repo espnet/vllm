@@ -128,8 +128,11 @@ is claimed」。所以**必须做一步参数转换**,这一节的 `convert/` �
 要紧的事:**`espnet/bagpiper-sft` 在这里出不了音频**(同一个服务、同一批请求,
 6 条里 0 条返回音频),想做语音就用 `bagpiper-tts-sft`。
 
-一个已知缺口也写在那里:`config.json` 和 tokenizer 官方没发,所以转换脚本目前要
-靠 `--ref-dir` 从一个已经有这两样东西的目录里拷。
+`config.json` 和 tokenizer 官方确实没发,但它们不用别人给:转换脚本会自己造。
+造的依据是公开、锁死版本的东西 —— 模型自己的训练 YAML 指名了用哪个 backbone,
+脚本就从那个 backbone 的仓库取 tokenizer 和 transformer 的几何参数,取的时候按
+git revision 加 sha256 双重锁定。所以一台干净机器上只要有官方权重就能转,不需要
+任何预先存在的目录。每个文件到底从哪来,`MODELS.md` 里有一张表。
 
 ### 0. 环境
 
@@ -203,29 +206,35 @@ XEUS 还需要仓库里的 `model/config.yaml`，它不在默认下载清单里�
 
 ### 2. 转换 checkpoint
 
-**bagpiper**：输入是 DeepSpeed 的 `mp_rank_00_model_states.pt`，
-`--ref-dir` 指向同一个下载目录，脚本从那里拷 config 和 tokenizer。
+从官方权重转，不需要别的输入。`config.json` 和 tokenizer 由脚本自己造，造完
+先校验一遍，再开始写那 17 GB 权重 —— 顺序是故意这样排的，取源文件失败或者
+哈希不对的时候不至于已经白写了一块盘。
+
+**bagpiper**：输入是官方发布的 `model.pt`（也接受它由之的
+`mp_rank_00_model_states.pt`），可以直接给下载目录。
 
 ```bash
-cd examples/espnet/convert
-python convert_bagpiper_ckpt.py \
-    ~/ckpt/vLLM_alm/bagpiper/mp_rank_00_model_states.pt \
-    ~/ckpt/bagpiper_converted \
-    --ref-dir ~/ckpt/vLLM_alm/bagpiper
+hf download espnet/bagpiper-tts-sft --local-dir ~/ckpt/bagpiper-tts-sft
+(cd ~/ckpt/bagpiper-tts-sft && sha256sum -c SHA256SUMS)
+
+python examples/espnet/convert/convert_bagpiper_ckpt.py \
+    ~/ckpt/bagpiper-tts-sft \
+    ~/ckpt/bagpiper_converted
 ```
 
-产物是 4 个 safetensors 分片加一个 index，约 17 GB。脚本会把顶层
-`config.json` 的 `model_type` 改写成 `bagpiper`；两个子 config 的
-`model_type` 保持 `speechlm_audio_encoder` 和 `speechlm_text` 不变，那是
-checkpoint 里原本的名字，实现按这个名字读。
+产物是 4 个 safetensors 分片加一个 index，约 17 GB。三处 `model_type` 都写成
+新名字：顶层是 `bagpiper`，两个子 config 是 `bagpiper_audio_encoder` 和
+`bagpiper_text` —— 这两个名字就是 `transformers_utils/configs/bagpiper.py`
+里那两个 config 类自己声明的值。老的转换目录里留的还是 `speechlm_*`，那是改
+名时没跟上的一半；那个字段实现根本不读，所以两种都能加载。
 
-**opuslm**：输入是 ESPnet 的 `model.pth`。
+**opuslm**：输入是 ESPnet 的 `model.pth`。`--model` 必须给，脚本靠它决定去读
+哪个官方 `config.yaml`、用哪个 backbone。
 
 ```bash
-python convert_opuslm_ckpt.py \
-    ~/ckpt/vLLM_alm/OpusLM/model.pth \
-    ~/ckpt/opuslm_converted \
-    --ref-dir ~/ckpt/vLLM_alm/OpusLM
+hf download espnet/OpusLM_7B_Anneal --local-dir ~/ckpt/opuslm
+python examples/espnet/convert/convert_opuslm_ckpt.py \
+    ~/ckpt/opuslm ~/ckpt/opuslm_converted --model opuslm
 ```
 
 产物是 3 个分片加 index，约 14 GB。分片是因为 `--max-shard-size` 默认
@@ -249,11 +258,17 @@ ARDelay 的对齐 pad、`<codec_ssl_start/end>`）由 `OpusLMTokenizer` 在之�
 bagpiper 不需要这一步：它用标准 Qwen3 分词器，自带的
 `chat_template.jinja` 直接可用。
 
-**opuslm_dialogue 不需要转换。** 它下载下来就是 `model.safetensors`，
-`config.json` 里已经写着 `model_type: opuslm_dialogue`，
-`tokenizer_config.json` 里的 chat template 已经是只取内容的那个。直接把
-`MODEL_PATH` 指到下载目录就能起服务。也正因为它不带 `model.pth`，
-`convert_opuslm_ckpt.py` 处理 dialogue 的那条分支没有真实数据可测。
+**opuslm_dialogue 走同一条路，只是权重文件叫 `2epoch.pth`。**
+
+```bash
+hf download espnet/multi_turn_SDS_RLAIF --local-dir ~/ckpt/sds
+python examples/espnet/convert/convert_opuslm_ckpt.py \
+    ~/ckpt/sds ~/ckpt/opuslm_dialogue_converted --model opuslm_dialogue
+```
+
+这条分支是拿真实数据验过的：官方 `2epoch.pth` 里 221 张张量，按脚本的映射规则
+处理之后丢掉 1 张 `criterion.*`，剩下 **220 张全部逐位相同**，最大绝对差 0.0，
+形状和 dtype 两边一致。证明过程写在 [`MODELS.md`](MODELS.md)。
 
 ### 3. 起服务
 
@@ -268,7 +283,7 @@ CUDA_VISIBLE_DEVICES=0 MODEL_PATH=~/ckpt/bagpiper_converted \
 CUDA_VISIBLE_DEVICES=1 MODEL_PATH=~/ckpt/opuslm_converted \
     bash serve_opuslm.sh                         # 端口 9812
 
-CUDA_VISIBLE_DEVICES=2 MODEL_PATH=~/ckpt/vLLM_alm/OpusLM_dialogue \
+CUDA_VISIBLE_DEVICES=2 MODEL_PATH=~/ckpt/opuslm_dialogue_converted \
     bash serve_opuslm_dialogue.sh                # 端口 9813
 ```
 

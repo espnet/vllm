@@ -8,7 +8,13 @@ Tooling for the ESPnet audio language models supported by this fork:
 Layout:
 
 - `convert/` — checkpoint converters (ESPnet / DeepSpeed → HF-style
-  safetensors directories ready for `vllm serve`).
+  safetensors directories ready for `vllm serve`), plus
+  `convert/bootstrap_assets.py`, which builds the `config.json` and tokenizer
+  espnet does not publish from pinned public sources. The converters call it
+  themselves, so converting an official checkpoint needs no other input. Run it
+  directly to build only the assets, to list its pinned sources with URLs and
+  hashes (`--print-sources`), or to diff what it generates against a directory
+  you already trust (`--compare-with`).
 - `serve_bagpiper.sh`, `serve_opuslm.sh`, `serve_opuslm_dialogue.sh` —
   server launch scripts (ports 9811 / 9812 / 9813 by default;
   `MODEL_PATH` is required, extra args pass through to `vllm serve`).

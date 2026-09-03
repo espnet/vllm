@@ -10,6 +10,7 @@ any third-party corpus, so these files are safe to redistribute.
 | --- | --- |
 | model | [`espnet/bagpiper-tts-sft`](https://huggingface.co/espnet/bagpiper-tts-sft) rev `675e2fafccc7dd7205fad6f8fdc4451f9ee6f768` |
 | conversion | `examples/espnet/convert/convert_bagpiper_ckpt.py` — 1381 tensors written bit-for-bit, `vocab_weight` dropped |
+| reproducible? | yes, from the official checkpoint alone. Re-running the converter without `--ref-dir` produced safetensors shards with **identical sha256** to the ones that made these clips. Sampling is stochastic, so you will get different waveforms from the same weights, not these files. |
 | runtime | this fork at vLLM 0.28.0, `serve_bagpiper.sh`, TP=1 |
 | request | `--task tts`, `mode: text_audio`, `text_temperature 0.6`, `audio_temperature 0.8`, `audio_topk 20`, `max_tokens 12000` |
 | system prompt | the client's `DEFAULT_TTS_SYSTEM` (the one the model was trained with) |

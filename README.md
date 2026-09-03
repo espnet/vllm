@@ -36,23 +36,29 @@ declares the matching `model_type`.
 
 **None of the published checkpoints is directly vLLM-loadable** — they ship raw
 ESPnet weights with no `config.json`, tokenizer or safetensors, so a conversion
-step is required. [`examples/espnet/MODELS.md`](examples/espnet/MODELS.md) records
-which repo and revision each model comes from, how that was proven, and what
-conversion each needs.
+step is required. The converter builds those missing files itself, from public
+sources pinned by revision and hash, so nothing else is needed.
+[`examples/espnet/MODELS.md`](examples/espnet/MODELS.md) records which repo and
+revision each model comes from, how that was proven, and where every generated
+file comes from.
 
 ## Quickstart
 
-```bash
-# 1. fetch the official weights (18 GB of native ESPnet checkpoint)
-hf download espnet/bagpiper-tts-sft --local-dir ~/models/bagpiper-tts-sft
-sha256sum -c ~/models/bagpiper-tts-sft/SHA256SUMS
+Copy-paste runnable on a clean machine once vLLM 0.28.0 and this fork's Python
+tree are installed. One GPU, no other inputs.
 
-# 2. convert to a vLLM-loadable directory. --ref-dir supplies config.json and
-#    the tokenizer, which espnet does not publish (see MODELS.md).
+```bash
+# 1. fetch the official weights (17 GB of native ESPnet checkpoint)
+hf download espnet/bagpiper-tts-sft --local-dir ~/models/bagpiper-tts-sft
+(cd ~/models/bagpiper-tts-sft && sha256sum -c SHA256SUMS)
+
+# 2. convert. config.json and the tokenizer are built from pinned public
+#    sources -- Qwen3-8B-Base for the text side, Qwen3-Omni for the audio
+#    tower, both named by Bagpiper's own released training YAML -- then
+#    validated before any weight is written.
 python examples/espnet/convert/convert_bagpiper_ckpt.py \
-    ~/models/bagpiper-tts-sft ~/models/bagpiper-tts-sft-vllm \
-    --ref-dir /path/to/a/bagpiper/config+tokenizer/dir
-# add --dry-run first to validate weight coverage without writing 18 GB
+    ~/models/bagpiper-tts-sft ~/models/bagpiper-tts-sft-vllm
+# add --dry-run first to check weight coverage without writing 17 GB
 
 # 3. serve (port 9811; extra args pass through to `vllm serve`)
 MODEL_PATH=~/models/bagpiper-tts-sft-vllm bash examples/espnet/serve_bagpiper.sh
@@ -61,13 +67,33 @@ MODEL_PATH=~/models/bagpiper-tts-sft-vllm bash examples/espnet/serve_bagpiper.sh
 python examples/espnet/clients/client_bagpiper.py --task tts --out demo.wav
 ```
 
-The converter validates every tensor against the weight groups the model can
-load and exits non-zero listing anything unexpected, so a layout change fails
-loudly instead of producing a directory that loads with missing weights.
+The other two models are the same shape, with `--model` naming which one the
+checkpoint is:
 
-`opuslm` and `opuslm_dialogue` follow the same three steps with
-`convert_opuslm_ckpt.py`, `serve_opuslm.sh` / `serve_opuslm_dialogue.sh`, and
-`client_opuslm.py` / `client_opuslm_dialogue.py`.
+```bash
+hf download espnet/OpusLM_7B_Anneal --local-dir ~/models/opuslm
+python examples/espnet/convert/convert_opuslm_ckpt.py \
+    ~/models/opuslm ~/models/opuslm-vllm --model opuslm
+MODEL_PATH=~/models/opuslm-vllm bash examples/espnet/serve_opuslm.sh
+
+hf download espnet/multi_turn_SDS_RLAIF --local-dir ~/models/sds
+python examples/espnet/convert/convert_opuslm_ckpt.py \
+    ~/models/sds ~/models/opuslm-dialogue-vllm --model opuslm_dialogue
+MODEL_PATH=~/models/opuslm-dialogue-vllm bash examples/espnet/serve_opuslm_dialogue.sh
+```
+
+Two things the converter refuses to do quietly. It validates every tensor
+against the weight groups the model can load and exits non-zero listing
+anything unexpected, so a layout change fails loudly instead of producing a
+directory that loads with missing weights. And every fetched source file is
+checked against a recorded sha256, so an upstream edit to a tokenizer stops the
+conversion instead of silently changing your model.
+
+On a machine with no network access, pre-download what
+`python examples/espnet/convert/bootstrap_assets.py --model bagpiper --print-sources`
+lists (about 11 MB) and pass `--assets-from <dir>`. To build just the
+config/tokenizer, or to diff them against a directory you already trust, run
+that script directly.
 
 ## Bagpiper takes a scene description, not a sentence to read
 
@@ -131,6 +157,19 @@ On H100 80GB (Linux, CUDA 13 driver, Python 3.12), tensor parallel size 1:
   both converted from their official `model.pt`. Verified by reading the written
   safetensors back: 1381 of 1381 tensors bit-identical to the source, zero dtype
   or shape drift, `vocab_weight` dropped, shard index consistent.
+- **conversion with no reference directory** — `espnet/bagpiper-tts-sft`
+  converted again from `model.pt` alone, with `config.json` and the tokenizer
+  fetched and built from the pinned public sources. 1381 of 1381 tensors
+  bit-identical to the source, and all four safetensors shards sha256-identical
+  to the earlier conversion. The generated assets were diffed against the
+  known-good directory file by file (see MODELS.md) and the loaded tokenizers
+  agree on every id tested. Run on transformers 5.16.1 / huggingface_hub
+  1.29.0, i.e. not the version the assets were originally written with.
+- **serving and audio from that directory** — served on this fork and returned
+  audio for both requests sent, `finish_reason=stop`: 1.26 s for the client's
+  default scene prompt and 2.58 s for a fresh hand-written one. Whisper
+  transcribed the first word-for-word; on the second it dropped a leading "The"
+  and wrote "6" for "six". Nobody listened to these two clips.
 - **bagpiper serving and audio** — the converted `bagpiper-tts-sft` served on this
   fork produced audio for 6 of 6 hand-written scene prompts, all
   `finish_reason=stop`. Whisper transcribed two of them word-for-word; the rest
@@ -139,9 +178,13 @@ On H100 80GB (Linux, CUDA 13 driver, Python 3.12), tensor parallel size 1:
   audio through the same server. See
   [`examples/espnet/MODELS.md`](examples/espnet/MODELS.md); use `bagpiper-tts-sft`
   for speech.
+- **opuslm_dialogue conversion** — converted from the official `2epoch.pth`
+  with no reference directory: 220 tensors in 2 shards, and the generated
+  `config.json` came out **identical** to the known-good one, key for key.
 - **opuslm**, **opuslm_dialogue** — provenance proven by hash and tensor
-  comparison (see MODELS.md). Their earlier TTS/ASR/dialogue runs are recorded in
-  the Chinese guide; they were **not** re-run for this change.
+  comparison (see MODELS.md). Their generated assets were diffed against the
+  known-good directories, but neither model was **served** for this change; the
+  earlier TTS/ASR/dialogue runs are recorded in the Chinese guide.
 - Docker — **not** built end-to-end; static and config checks only.
 - Not covered: multi-GPU (TP>1), throughput or latency benchmarking, and formal
   audio-quality scoring. Nobody listened to the demo clips as part of producing

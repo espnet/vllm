@@ -19,13 +19,42 @@ Key mapping (ESPnet -> vLLM/HF):
 Any other key is an error (listing the offending keys) so silent weight
 loss is impossible.
 
+CONFIG AND TOKENIZER
+    espnet publishes neither, so by default they are **built from public
+    pinned sources** by bootstrap_assets.py. Both are fully determined by
+    artifacts you can download:
+
+    * the tokenizer is the backbone's, copied byte-for-byte from the repo the
+      released ``config.yaml`` names in ``subword_model``
+      (allenai/OLMo-2-1124-7B for opuslm, HuggingFaceTB/SmolLM-1.7B for
+      opuslm_dialogue), with only the chat template replaced -- see
+      fix_chat_template below for why;
+    * every vocabulary boundary comes from that YAML's ``token_bias`` block and
+      every special-token id is looked up **by name** in its ``token_list``,
+      so a checkpoint whose special block moved fails loudly instead of
+      silently mapping to the wrong token;
+    * the transformer geometry comes from the backbone named in
+      ``transformer_conf.hf_model_tag`` (which for opuslm_dialogue is a
+      *different* repo than the tokenizer: SmolLM2-1.7B-Instruct).
+
+    So no pre-existing converted directory is needed. ``--ref-dir`` is still
+    accepted for reusing one you already have.
+
 Usage:
-    python convert_opuslm_ckpt.py <model.pth> <output_dir> \
-        --ref-dir /path/to/reference/opuslm-checkpoint
+    # from the official checkpoint, nothing else needed:
+    python convert_opuslm_ckpt.py <model.pth> <output_dir> --model opuslm
 
     # Inspect the key mapping without writing anything:
-    python convert_opuslm_ckpt.py <model.pth> <output_dir> \
-        --ref-dir /path/to/ref --dry-run
+    python convert_opuslm_ckpt.py <model.pth> <output_dir> --dry-run
+
+Example:
+    hf download espnet/OpusLM_7B_Anneal --local-dir ~/models/opuslm
+    python convert_opuslm_ckpt.py ~/models/opuslm ~/models/opuslm-vllm \
+        --model opuslm
+
+    hf download espnet/multi_turn_SDS_RLAIF --local-dir ~/models/sds
+    python convert_opuslm_ckpt.py ~/models/sds/2epoch.pth \
+        ~/models/opuslm-dialogue-vllm --model opuslm_dialogue
 """
 
 import argparse
@@ -38,6 +67,14 @@ from pathlib import Path
 
 import torch
 from safetensors.torch import save_file
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bootstrap_assets  # noqa: E402  (same directory, not an installed module)
+
+# Filenames that may hold the state dict, in the order we look for them inside
+# a directory. espnet/OpusLM_7B_Anneal publishes model.pth;
+# espnet/multi_turn_SDS_RLAIF publishes 2epoch.pth.
+CKPT_FILENAMES = ("model.pth", "2epoch.pth")
 
 # Non-weight files to copy from the reference checkpoint (when present).
 # OpusLM checkpoints have no generation_config.json / chat_template.jinja;
@@ -280,10 +317,43 @@ def main():
         help="Maximum shard size (default: 5GB)",
     )
     parser.add_argument(
+        "--model",
+        choices=("opuslm", "opuslm_dialogue"),
+        default=None,
+        help=(
+            "Which of the two models this checkpoint is. Required unless "
+            "--ref-dir is given, because it selects the released config.yaml "
+            "and backbone the config/tokenizer are built from."
+        ),
+    )
+    parser.add_argument(
         "--ref-dir",
         type=str,
-        required=True,
-        help="Reference checkpoint dir for config/tokenizer files",
+        default=None,
+        help=(
+            "Reuse the config/tokenizer from an existing converted directory "
+            "instead of building them from the pinned public sources. Only "
+            "needed if you already have one."
+        ),
+    )
+    parser.add_argument(
+        "--assets-from",
+        type=Path,
+        default=None,
+        help=(
+            "Build the config/tokenizer from pinned source files already on "
+            "disk instead of downloading them (see "
+            "'bootstrap_assets.py --model opuslm --print-sources')"
+        ),
+    )
+    parser.add_argument(
+        "--no-legacy-overrides",
+        action="store_true",
+        help=(
+            "Emit purely backbone-derived config values instead of the ones "
+            "the validated reference config uses. Changes model numerics; "
+            "read what bootstrap_assets.py prints before using it."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -292,22 +362,34 @@ def main():
     )
     args = parser.parse_args()
 
+    if args.model is None and args.ref_dir is None and not args.dry_run:
+        parser.error(
+            "pass --model opuslm or --model opuslm_dialogue (it selects the "
+            "released config.yaml and backbone to build the config/tokenizer "
+            "from), or --ref-dir to reuse an existing converted directory"
+        )
+
     # Resolve input path: accept either the .pth file or its parent directory
     input_path = Path(args.input)
     if input_path.is_dir():
-        candidate = input_path / "model.pth"
-        if candidate.exists():
-            input_path = candidate
+        for candidate_name in CKPT_FILENAMES:
+            candidate = input_path / candidate_name
+            if candidate.exists():
+                input_path = candidate
+                break
         else:
-            print(f"ERROR: {candidate} not found. Please provide the .pth file directly.")
+            print(
+                f"ERROR: none of {list(CKPT_FILENAMES)} found in {input_path}. "
+                f"Pass the checkpoint file directly."
+            )
             sys.exit(1)
 
     if not input_path.exists():
         print(f"ERROR: {input_path} does not exist.")
         sys.exit(1)
 
-    ref_dir = Path(args.ref_dir)
-    if not ref_dir.exists():
+    ref_dir = Path(args.ref_dir) if args.ref_dir else None
+    if ref_dir is not None and not ref_dir.exists():
         print(f"ERROR: Reference checkpoint dir {ref_dir} does not exist.")
         sys.exit(1)
 
@@ -327,14 +409,41 @@ def main():
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
+    # Config and tokenizer first: they are small, and building them can fail on
+    # a network or hash problem. Better to find that out before writing 14 GB.
+    if ref_dir is not None:
+        copy_config_files(output_dir, ref_dir)
+    else:
+        print("\nBuilding config/tokenizer from pinned public sources ...")
+        # Reported so the generator can flag a mismatch with what the training
+        # YAML asked for. It does not pick config.torch_dtype from this.
+        dtypes = {str(t.dtype).removeprefix("torch.") for t in mapped.values()}
+        checkpoint_dtype = next(iter(dtypes)) if len(dtypes) == 1 else None
+        if checkpoint_dtype is None:
+            print(f"  NOTE: checkpoint mixes dtypes {sorted(dtypes)}")
+        bootstrap_assets.build_opuslm_assets(
+            Path(output_dir),
+            model=args.model,
+            offline_dir=args.assets_from,
+            legacy_overrides=not args.no_legacy_overrides,
+            checkpoint_dtype=checkpoint_dtype,
+        )
+        bootstrap_assets.validate(Path(output_dir), args.model)
+
     print()
     max_shard_bytes = parse_size(args.max_shard_size)
     save_sharded_safetensors(mapped, output_dir, max_shard_bytes)
 
-    copy_config_files(output_dir, ref_dir)
-
     print(f"\nDone! vLLM checkpoint saved to: {output_dir}")
     print(f"Files: {sorted(os.listdir(output_dir))}")
+    model = args.model or json.loads(
+        (Path(output_dir) / "config.json").read_text()
+    ).get("model_type", "opuslm")
+    suffix = "_dialogue" if model == "opuslm_dialogue" else ""
+    print("\nServe it with:")
+    print(f"  MODEL_PATH={output_dir} bash examples/espnet/serve_opuslm{suffix}.sh")
+    print("Then send a request:")
+    print(f"  python examples/espnet/clients/client_opuslm{suffix}.py")
 
 
 if __name__ == "__main__":

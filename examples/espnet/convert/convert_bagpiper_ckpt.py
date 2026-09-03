@@ -34,38 +34,40 @@ WEIGHT HANDLING
     and after so a silent cast cannot hide.
 
 CONFIG AND TOKENIZER
-    These are not published by espnet, so they are copied from --ref-dir: any
-    directory that already holds a Bagpiper config.json plus the tokenizer
-    files. config.json is then rewritten to the canonical naming
+    espnet publishes neither, so by default they are **built from public
+    pinned sources** by bootstrap_assets.py: the tokenizer from
+    Qwen/Qwen3-8B-Base (ids shifted by the 256 reserved specials, then the 8
+    Xcodec streams appended), the transformer geometry from that same repo's
+    config.json, and the audio tower's from
+    Qwen/Qwen3-Omni-30B-A3B-Instruct -- both of them named by Bagpiper's own
+    released training YAML. Every fetch is pinned to a revision and to a
+    sha256, and the result is validated before any weight is written.
+
+    So no pre-existing converted directory is needed. ``--ref-dir`` is still
+    accepted, for the case where you already have one and want to reuse it
+    byte-for-byte; config.json is then rewritten to the canonical naming
     (``model_type: "bagpiper"``, ``architectures:
-    ["BagpiperForConditionalGeneration"]``) even when the reference still uses
-    the legacy ``speechlm`` names.
+    ["BagpiperForConditionalGeneration"]``) even though the older reference
+    directories use the legacy ``speechlm`` names.
 
-    For reference, the vocabulary layout is fully determined by the released
-    YAML: tokenizer Qwen/Qwen3-8B-Base (151,936 tokens) sits at
-    [text_token_offset=256, text_token_end=152192), the 8 Xcodec streams
-    occupy [152192, 152192 + 8*1025) and vocab_size is 160,392.
-
-Weight keys are written to safetensors verbatim (no renames); all mapping to
-vLLM module names happens at load time in the model
-(``BagpiperForConditionalGeneration.hf_to_vllm_mapper``).
-
-After copying the config/tokenizer files from ``--ref-dir``, config.json in
-the output directory is rewritten to the new naming
-(``model_type: "bagpiper"``, ``architectures:
-["BagpiperForConditionalGeneration"]``) so that new conversions always emit
-the canonical names even when the reference checkpoint still uses the legacy
-``speechlm`` naming.
+    The vocabulary layout is fully determined by the released YAML: tokenizer
+    Qwen/Qwen3-8B-Base (151,936 ids) sits at [text_token_offset=256,
+    text_token_end=152192), the 8 Xcodec streams occupy
+    [152192, 152192 + 8*1025), and vocab_size is 160,392.
 
 Usage:
+    # from the official checkpoint, nothing else needed:
+    python convert_bagpiper_ckpt.py <input_path> <output_dir>
+
+    # air-gapped: pre-download what `bootstrap_assets.py --model bagpiper
+    # --print-sources` lists, then
     python convert_bagpiper_ckpt.py <input_path> <output_dir> \
-        --ref-dir /path/to/reference/bagpiper-checkpoint
+        --assets-from /path/to/downloaded/sources
 
 Example:
+    hf download espnet/bagpiper-tts-sft --local-dir ~/models/bagpiper-tts-sft
     python convert_bagpiper_ckpt.py \
-        /path/to/exp/.../mp_rank_00_model_states.pt \
-        /path/to/output/bagpiper-step272500 \
-        --ref-dir /path/to/hf/vLLM_alm/bagpiper
+        ~/models/bagpiper-tts-sft ~/models/bagpiper-tts-sft-vllm
 """
 
 import argparse
@@ -78,6 +80,9 @@ from pathlib import Path
 
 import torch
 from safetensors.torch import save_file
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bootstrap_assets  # noqa: E402  (same directory, not an installed module)
 
 # Non-weight files to copy from the reference checkpoint
 CONFIG_FILES = [
@@ -386,8 +391,31 @@ def main():
     parser.add_argument(
         "--ref-dir",
         type=str,
-        required=True,
-        help="Reference checkpoint dir for config/tokenizer files",
+        default=None,
+        help=(
+            "Reuse the config/tokenizer from an existing converted directory "
+            "instead of building them from the pinned public sources. Only "
+            "needed if you already have one."
+        ),
+    )
+    parser.add_argument(
+        "--assets-from",
+        type=Path,
+        default=None,
+        help=(
+            "Build the config/tokenizer from pinned source files already on "
+            "disk instead of downloading them (see "
+            "'bootstrap_assets.py --model bagpiper --print-sources')"
+        ),
+    )
+    parser.add_argument(
+        "--no-legacy-overrides",
+        action="store_true",
+        help=(
+            "Emit purely backbone-derived config values instead of the ones "
+            "the validated reference config uses. Changes model numerics; "
+            "read what bootstrap_assets.py prints before using it."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -415,8 +443,8 @@ def main():
         print(f"ERROR: {input_path} does not exist.")
         sys.exit(1)
 
-    ref_dir = Path(args.ref_dir)
-    if not ref_dir.exists():
+    ref_dir = Path(args.ref_dir) if args.ref_dir else None
+    if ref_dir is not None and not ref_dir.exists():
         print(f"ERROR: Reference checkpoint dir {ref_dir} does not exist.")
         sys.exit(1)
 
@@ -439,14 +467,24 @@ def main():
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
+    # Config and tokenizer first: they are small, and building them can fail on
+    # a network or hash problem. Better to find that out before writing 18 GB.
+    if ref_dir is not None:
+        copy_config_files(output_dir, ref_dir)
+        rewrite_model_naming(output_dir)
+    else:
+        print("\nBuilding config/tokenizer from pinned public sources ...")
+        bootstrap_assets.build_bagpiper_assets(
+            Path(output_dir),
+            offline_dir=args.assets_from,
+            legacy_overrides=not args.no_legacy_overrides,
+        )
+        bootstrap_assets.validate(Path(output_dir), "bagpiper")
+
     # Save model weights
     print()
     max_shard_bytes = parse_size(args.max_shard_size)
     save_sharded_safetensors(state_dict, output_dir, max_shard_bytes)
-
-    # Copy config and tokenizer files, then rewrite to the new naming
-    copy_config_files(output_dir, ref_dir)
-    rewrite_model_naming(output_dir)
 
     dtypes_out = report_dtypes(state_dict, "written")
     if dtypes_out != {k: v for k, v in dtypes_in.items() if v and k in dtypes_out} \
@@ -458,12 +496,15 @@ def main():
 
     print(f"\nDone. vLLM checkpoint written to: {output_dir}")
     print(f"  tensors      : {len(state_dict)}")
-    print(f"  dropped      : {len(dropped)} ({', '.join(dropped) if dropped else 'none'})")
+    print(f"  dropped      : {len(dropped)} ({', '.join(dropped) or 'none'})")
     print(f"  files        : {sorted(os.listdir(output_dir))}")
     print("\nServe it with:")
     print(f"  MODEL_PATH={output_dir} bash examples/espnet/serve_bagpiper.sh")
     print("Then send a request (describe the scene, quote any spoken line):")
-    print("  python examples/espnet/clients/client_bagpiper.py --task tts --out demo.wav")
+    print(
+        "  python examples/espnet/clients/client_bagpiper.py "
+        "--task tts --out demo.wav"
+    )
 
 
 if __name__ == "__main__":
