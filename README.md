@@ -12,11 +12,16 @@ for three ESPnet speech models: **bagpiper**, **opuslm**, and
 |  |  |
 | --- | --- |
 | Upstream base | vLLM **v0.28.0**, tag commit `2cf0a6915ce544dc493a0990f2ea38d81601128a` (2026-08-23) |
-| This branch | `espnet-audio-v0.28.0` — 15 commits on top of that tag |
+| This branch | `espnet-audio-v0.28.0` |
 | Docker base image | `vllm/vllm-openai:v0.28.0` |
 
 The three model implementations are Python-only, so compiled kernels come
 straight from the upstream v0.28.0 wheel.
+
+For the exact commit of a checkout, run `git rev-parse HEAD`; for a packaged
+snapshot, read the manifest that ships beside the archive. This file
+deliberately records no commit count — any number written here would be stale
+the moment the commit writing it landed.
 
 ## The models
 
