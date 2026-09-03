@@ -77,14 +77,22 @@ Output of the built-in default prompt (`'Hello, how are you today?'`, 1.80 s,
 
 ## Docker
 
-[`examples/espnet/docker/`](examples/espnet/docker/README.md) holds a Dockerfile
-deriving from `vllm/vllm-openai:v0.28.0`. **No image has been built or published
-from this repository** — the files were checked statically only. Build it
-yourself, from the repo root:
+[`examples/espnet/docker/`](examples/espnet/docker/README.md) holds one
+Dockerfile covering **x86_64/amd64 and ARM64/aarch64**, deriving from
+`vllm/vllm-openai:v0.28.0` — verified against the Docker Hub registry API to be
+a real multi-arch manifest list, with both per-arch digests pinned in
+`build.sh`.
 
 ```bash
-docker build -f examples/espnet/docker/Dockerfile -t espnet-vllm:v0.28.0 .
+examples/espnet/docker/build.sh --arch amd64     # or arm64, or both
+examples/espnet/docker/build.sh --arch arm64 --dry-run   # print the command only
 ```
+
+**No image has been built or published from this repository, for either
+architecture.** What is verified is the base image's architecture support, the
+aarch64 availability of every pinned wheel, and the syntax of the Dockerfile and
+build script. Runtime behaviour inside a container is not. The Docker README
+splits verified from unverified explicitly.
 
 ## What has actually been tested
 

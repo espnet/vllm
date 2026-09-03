@@ -461,7 +461,50 @@ build 镜像，也不允许 push。所以下面的命令是按 Dockerfile 的内
 镜像从上游官方镜像 `vllm/vllm-openai:v0.28.0` 派生，H100 属于 sm90，上游
 wheel 已经覆盖，所以不需要本地编译 CUDA kernel。
 
-在仓库根目录构建（不是在 `examples/espnet/docker` 里）：
+### 两种架构:x86_64/amd64 与 ARM64/aarch64
+
+**这一点是查过 registry 的,不是猜的。** 09-03 用 Docker Hub 的 registry API
+查过 `vllm/vllm-openai:v0.28.0`,它确实是一个多架构的 manifest list:
+
+| 项 | 值 |
+| --- | --- |
+| index digest | `sha256:61fc8a896b0a4fbbbdc063bc4b0dbc25ce98e02b5050c24aeb7830ac02039b14` |
+| `linux/amd64` | `sha256:2286e8533ca8b6bc777594bae30524f1426ba46ca21797524e06df6a94b06635` |
+| `linux/arm64` | `sha256:2a7cde230b59f3ce6cab33dd245ba6bee41aa87b38c9fe84f966ff24016813ce` |
+
+两个架构各自的 image config blob 也拉下来看过,分别写着 `architecture: amd64`
+和 `arm64`,`os: linux`。所以不是 index 单方面声称有两个平台,两个都是真的。
+
+因此这里只有**一个** Dockerfile,不是每个架构一份 —— 架构之间唯一的差别就是
+基础镜像钉哪个 digest,这件事交给 `build.sh` 显式指定。两份只差一行 `FROM` 的
+Dockerfile 迟早会各自漂移,所以没有那样做。
+
+构建脚本会按 digest 钉住基础镜像,这样几个月后重建拿到的还是同一批字节,
+即使 `v0.28.0` 这个 tag 被重新推过:
+
+```bash
+examples/espnet/docker/build.sh --arch amd64     # x86_64
+examples/espnet/docker/build.sh --arch arm64     # aarch64
+examples/espnet/docker/build.sh --arch both      # 多平台,输出 OCI layout
+examples/espnet/docker/build.sh --arch amd64 --dry-run   # 只打印命令,不执行
+```
+
+跨架构构建需要先注册 QEMU binfmt
+(`docker run --privileged --rm tonistiigi/binfmt --install all`);`--arch both`
+还需要 buildx 的 container driver(`docker buildx create --use`)。多平台产物
+无法 `--load` 进本地镜像库,所以 `--arch both` 写出一个 OCI layout 的 tar,
+不往任何地方 push。
+
+**已核对的**:基础镜像两个架构都在;这个镜像会强制重装的
+`torch==2.13.0`、`torchvision==0.28.0`、`torchaudio==2.11.0` 三个 pin 在 PyPI
+上都有 `manylinux_2_28_aarch64` 的 wheel,不只有 x86_64;`espnet` 和
+`espnet_model_zoo` 是纯 Python 的 `py3-none-any`。
+**没有核对的**:aarch64 上那个 torch wheel 装进容器之后,CUDA 那一套是否和基础
+镜像原来带的一样能用。现在的 torch 把 CUDA 拆成独立的 `nvidia-*` 依赖包,光看
+wheel 的文件名和体积回答不了这个问题,必须真的在 aarch64 上构建一次才知道。
+
+不带脚本的等价写法(在仓库根目录构建,不是在 `examples/espnet/docker` 里,
+解析出来的架构就是当前 daemon 所在的架构):
 
 ```bash
 docker build -f examples/espnet/docker/Dockerfile -t espnet-vllm:v0.28.0 .

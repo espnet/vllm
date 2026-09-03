@@ -5,20 +5,89 @@ Derives from `vllm/vllm-openai:v0.28.0`, swaps in this fork's Python code
 is Python-only), and adds the ESPnet runtime dependencies for OpusLM
 audio decode/encode.
 
+Supports **x86_64/amd64** and **ARM64/aarch64** from a single Dockerfile.
+
+## Architectures
+
+The base image is a genuine multi-arch manifest list. Verified against the
+Docker Hub registry API on 2026-09-03 — not assumed:
+
+| | |
+| --- | --- |
+| `mediaType` | `application/vnd.docker.distribution.manifest.list.v2+json` |
+| index digest | `sha256:61fc8a896b0a4fbbbdc063bc4b0dbc25ce98e02b5050c24aeb7830ac02039b14` |
+| `linux/amd64` | `sha256:2286e8533ca8b6bc777594bae30524f1426ba46ca21797524e06df6a94b06635` |
+| `linux/arm64` | `sha256:2a7cde230b59f3ce6cab33dd245ba6bee41aa87b38c9fe84f966ff24016813ce` |
+
+Each per-arch **image config blob** was fetched too, and reports
+`architecture: amd64` / `arm64` with `os: linux`. So the index is not merely
+claiming two platforms — both are real.
+
+That is why there is one Dockerfile rather than two. The only
+per-architecture input is which base digest to pin, and `build.sh` supplies it
+explicitly. Two near-identical Dockerfiles differing in one `FROM` line would
+drift apart; this keeps the architectures visible without the duplication.
+
 ## Build
 
-From the **repo root** (the build context must be the repo root):
+`build.sh` pins the base by digest, so a rebuild months from now uses the same
+bytes even if the `v0.28.0` tag is re-pushed:
+
+```bash
+examples/espnet/docker/build.sh --arch amd64     # x86_64, digest-pinned, --load
+examples/espnet/docker/build.sh --arch arm64     # aarch64, digest-pinned, --load
+examples/espnet/docker/build.sh --arch both      # multi-platform, OCI layout
+examples/espnet/docker/build.sh --arch amd64 --dry-run   # print the command only
+```
+
+A cross-architecture build needs QEMU binfmt registered
+(`docker run --privileged --rm tonistiigi/binfmt --install all`), and
+`--arch both` needs a buildx container driver (`docker buildx create --use`).
+Multi-platform results cannot be `--load`ed into the classic image store, so
+`--arch both` writes an OCI layout tarball instead of pushing anywhere.
+
+The plain single-arch equivalent, run from the **repo root** (the build context
+must be the repo root), resolves whichever architecture the daemon is on:
 
 ```bash
 docker build -f examples/espnet/docker/Dockerfile -t espnet-vllm:v0.28.0 .
 ```
 
-This `COPY`s the local checkout, so the image contains exactly your
+Either path `COPY`s the local checkout, so the image contains exactly your
 working tree. To build from a remote instead, edit the Dockerfile: replace
 the `COPY . /workspace/vllm-fork` line with the `ARG` + `git clone` block
 in the comment above it, then pass `--build-arg VLLM_FORK_URL=...
 --build-arg VLLM_FORK_REF=...`. The build args have no effect on their
 own — nothing reads them until that line is replaced.
+
+## What is verified, and what is not
+
+**Verified** (static and registry/index checks, 2026-09-03):
+
+- the base image carries both `linux/amd64` and `linux/arm64`, confirmed from
+  the per-arch config blobs, with the digests above;
+- `torch==2.13.0`, `torchvision==0.28.0` and `torchaudio==2.11.0` — the pins
+  this image force-reinstalls — all publish `manylinux_2_28_aarch64` wheels as
+  well as `x86_64`, so that layer is not x86-only by availability;
+- `espnet` and `espnet_model_zoo` ship pure-Python `py3-none-any` wheels;
+- `Dockerfile` parses: first instruction is `FROM`, no unknown instructions, no
+  dangling line continuation;
+- `build.sh` passes `bash -n`, and its `--dry-run` output was inspected for
+  amd64, arm64 and both.
+
+**Not verified — no image has been built for either architecture.** In
+particular:
+
+- whether the aarch64 `torch` wheel resolves the same working CUDA stack inside
+  the container as the base image shipped. Modern torch pulls CUDA through
+  separate `nvidia-*` dependency wheels, so wheel size and filename cannot
+  answer this. Confirm with a real aarch64 build before relying on GPU serving
+  there.
+- the ESPnet dependency resolution, the DAC pre-warm step, and runtime
+  behaviour on either architecture.
+
+All runtime testing recorded elsewhere in this repository was done on H100
+(sm90, amd64) **outside** Docker.
 
 ## Run
 

@@ -24,8 +24,34 @@
 #      and build with --build-arg VLLM_FORK_URL=... VLLM_FORK_REF=...
 #
 # See README.md next to this file for run commands.
+#
+# ── ARCHITECTURES ────────────────────────────────────────────────────────
+# One Dockerfile covers both x86_64/amd64 and ARM64/aarch64, because the
+# base image is genuinely multi-arch. That was verified against the Docker
+# Hub registry API on 2026-09-03, not assumed:
+#
+#   vllm/vllm-openai:v0.28.0
+#     mediaType : application/vnd.docker.distribution.manifest.list.v2+json
+#     index     : sha256:61fc8a896b0a4fbbbdc063bc4b0dbc25ce98e02b5050c24aeb7830ac02039b14
+#     linux/amd64 sha256:2286e8533ca8b6bc777594bae30524f1426ba46ca21797524e06df6a94b06635
+#     linux/arm64 sha256:2a7cde230b59f3ce6cab33dd245ba6bee41aa87b38c9fe84f966ff24016813ce
+#
+#   Each per-arch image config blob was fetched and reports architecture
+#   "amd64"/"arm64" with os "linux", so the index is not merely claiming it.
+#
+# BASE_IMAGE lets you pin one architecture by digest for a reproducible
+# single-arch build; build.sh next to this file does that for you. Leaving
+# the default tag lets the daemon resolve the arch it is running on.
+#
+# Duplicating this file per architecture was rejected deliberately: the two
+# copies would differ only in the FROM line and would drift. build.sh keeps
+# the per-arch inputs explicit instead.
+#
+# NOT VERIFIED: no image has been built for either architecture. See
+# README.md next to this file for exactly what is and is not established.
 
-FROM vllm/vllm-openai:v0.28.0
+ARG BASE_IMAGE=vllm/vllm-openai:v0.28.0
+FROM ${BASE_IMAGE}
 
 WORKDIR /workspace
 
@@ -70,6 +96,19 @@ RUN python3 -m pip install --no-cache-dir \
 # resolve an HF model tag, so without it every OpusLM /
 # OpusLM-dialogue audio decode raises ModuleNotFoundError.
 # joblib + scikit-learn: needed to load the XEUS kmeans model.
+#
+# ARCHITECTURE NOTE. This layer is the one place where the two architectures
+# could diverge, because it force-reinstalls torch over the base image's copy.
+# Checked on PyPI 2026-09-03: torch 2.13.0, torchvision 0.28.0 and torchaudio
+# 2.11.0 all publish manylinux_2_28_aarch64 wheels as well as x86_64, and
+# espnet/espnet_model_zoo ship pure-Python py3-none-any wheels, so nothing here
+# is x86-only by availability.
+#
+# What that check does NOT establish: whether the aarch64 torch wheel resolves
+# the same working CUDA stack inside the container as the base image shipped.
+# Modern torch pulls CUDA through separate nvidia-* dependency wheels, so wheel
+# size and filename cannot answer it. Confirm with a real aarch64 build before
+# relying on GPU serving there.
 RUN python3 -m pip install --no-cache-dir espnet espnet_model_zoo \
     && python3 -m pip install --no-cache-dir --force-reinstall \
         torch==2.13.0 torchvision==0.28.0 torchaudio==2.11.0 \
