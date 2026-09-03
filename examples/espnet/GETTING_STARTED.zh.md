@@ -110,6 +110,27 @@ n 条流在模型的 `compute_logits` 里用一个私有的 top-k 采样器采�
 
 ## 二、最短完整路径
 
+### 先说清楚:官方发布的权重都不能直接喂给 vLLM
+
+三个模型在 Hugging Face 上发布的都是**原生 ESPnet 权重**,没有 `config.json`、
+没有 tokenizer、也没有 safetensors。`espnet/bagpiper-sft` 的 model card 自己就写
+着「It is not a Transformers from_pretrained directory and no vLLM compatibility
+is claimed」。所以**必须做一步参数转换**,这一节的 `convert/` 脚本就是干这个的。
+
+| 本 fork 的名字 | 官方权重 | 发布格式 |
+| --- | --- | --- |
+| `bagpiper` | [`espnet/bagpiper-tts-sft`](https://huggingface.co/espnet/bagpiper-tts-sft)(做语音用这个) | `model.pt`,`{"module": state_dict}` |
+| `opuslm` | [`espnet/OpusLM_7B_Anneal`](https://huggingface.co/espnet/OpusLM_7B_Anneal) | `model.pth` |
+| `opuslm_dialogue` | [`espnet/multi_turn_SDS_RLAIF`](https://huggingface.co/espnet/multi_turn_SDS_RLAIF) | `2epoch.pth` |
+
+每个模型到底出自哪个 repo、哪个 revision,以及这些结论是怎么用哈希和逐张量比对
+**证明**出来的(不是猜的),都写在 [`MODELS.md`](MODELS.md) 里。那份文档还记了一件
+要紧的事:**`espnet/bagpiper-sft` 在这里出不了音频**(同一个服务、同一批请求,
+6 条里 0 条返回音频),想做语音就用 `bagpiper-tts-sft`。
+
+一个已知缺口也写在那里:`config.json` 和 tokenizer 官方没发,所以转换脚本目前要
+靠 `--ref-dir` 从一个已经有这两样东西的目录里拷。
+
 ### 0. 环境
 
 要求：Linux、NVIDIA H100（sm90）、CUDA 13 驱动、Python 3.12。
