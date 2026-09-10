@@ -7,6 +7,10 @@ audio decode/encode.
 
 Supports **x86_64/amd64** and **ARM64/aarch64** from a single Dockerfile.
 
+For GitHub Actions builds and Docker Hub publication, see
+[PUBLISHING.md](PUBLISHING.md). Automation starts disabled and currently targets
+amd64. Its dependency check blocks publication of an inconsistent runtime.
+
 ## Architectures
 
 The base image is a genuine multi-arch manifest list. Verified against the
@@ -75,8 +79,10 @@ own — nothing reads them until that line is replaced.
 - `build.sh` passes `bash -n`, and its `--dry-run` output was inspected for
   amd64, arm64 and both.
 
-**Not verified — no image has been built for either architecture.** In
-particular:
+**Runtime verification pending.** The maintainer has reported a locally built
+image, but its tag, architecture, source revision and test results have not yet
+been recorded in this repository. The 2026-09-03 checks above were static checks.
+In particular, they do not establish:
 
 - whether the aarch64 `torch` wheel resolves the same working CUDA stack inside
   the container as the base image shipped. Modern torch pulls CUDA through
@@ -86,8 +92,9 @@ particular:
 - the ESPnet dependency resolution, the DAC pre-warm step, and runtime
   behaviour on either architecture.
 
-All runtime testing recorded elsewhere in this repository was done on H100
-(sm90, amd64) **outside** Docker.
+The runtime testing recorded in the getting-started guide was done on H100
+(sm90, amd64) **outside** Docker. See [PUBLISHING.md](PUBLISHING.md) for the
+dependency conflict found during the 2026-09-09 review.
 
 ## Run
 

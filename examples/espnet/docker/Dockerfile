@@ -47,8 +47,8 @@
 # copies would differ only in the FROM line and would drift. build.sh keeps
 # the per-arch inputs explicit instead.
 #
-# NOT VERIFIED: no image has been built for either architecture. See
-# README.md next to this file for exactly what is and is not established.
+# See README.md for recorded build evidence and PUBLISHING.md for the
+# dependency conflict that must be resolved before automatic publication.
 
 ARG BASE_IMAGE=vllm/vllm-openai:v0.28.0
 FROM ${BASE_IMAGE}

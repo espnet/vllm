@@ -23,9 +23,7 @@
 #   bagpiper, opuslm, opuslm_dialogue
 # See README.md next to this file for run commands.
 #
-# NOTHING HERE HAS BEEN BUILT. No image was produced for either architecture on
-# the machine this script was written on; see README.md for the verified vs
-# unverified split.
+# See README.md for recorded validation and PUBLISHING.md for CI setup.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,7 +33,7 @@ DOCKERFILE="${SCRIPT_DIR}/Dockerfile"
 # Verified 2026-09-03 against registry-1.docker.io for vllm/vllm-openai:v0.28.0.
 # Index: sha256:61fc8a896b0a4fbbbdc063bc4b0dbc25ce98e02b5050c24aeb7830ac02039b14
 BASE_REPO="vllm/vllm-openai"
-BASE_TAG="v0.28.0"
+BASE_DIGEST_INDEX="sha256:61fc8a896b0a4fbbbdc063bc4b0dbc25ce98e02b5050c24aeb7830ac02039b14"
 BASE_DIGEST_AMD64="sha256:2286e8533ca8b6bc777594bae30524f1426ba46ca21797524e06df6a94b06635"
 BASE_DIGEST_ARM64="sha256:2a7cde230b59f3ce6cab33dd245ba6bee41aa87b38c9fe84f966ff24016813ce"
 
@@ -92,8 +90,7 @@ if [[ "$ARCH" == both ]]; then
     # Default outside the repo so a build never litters the tracked tree.
     OCI_DEST="${OCI_DEST:-${PWD}/espnet-vllm-oci}"
     echo "[build] arch      : linux/amd64,linux/arm64 (multi-platform)"
-    echo "[build] base      : ${BASE_REPO}:${BASE_TAG} (multi-arch tag; the daemon"
-    echo "                    picks the matching per-arch digest for each platform)"
+    echo "[build] base      : ${BASE_REPO}@${BASE_DIGEST_INDEX} (multi-arch index)"
     echo "[build] tag       : ${TAG}"
     echo "[build] output    : OCI layout at ${OCI_DEST}"
     echo "[build] note      : requires docker buildx with a container driver"
@@ -101,7 +98,7 @@ if [[ "$ARCH" == both ]]; then
     echo "                    non-native architecture."
     run docker buildx build \
         --platform linux/amd64,linux/arm64 \
-        --build-arg "BASE_IMAGE=${BASE_REPO}:${BASE_TAG}" \
+        --build-arg "BASE_IMAGE=${BASE_REPO}@${BASE_DIGEST_INDEX}" \
         -f "$DOCKERFILE" \
         -t "$TAG" \
         --output "type=oci,dest=${OCI_DEST}.tar" \

@@ -2,17 +2,22 @@
 
 A fork of [vLLM](https://github.com/vllm-project/vllm) that adds serving support
 for three ESPnet speech models: **bagpiper**, **opuslm**, and
-**opuslm_dialogue**. Everything else is upstream vLLM, unmodified.
+**opuslm_dialogue**, with engine and serving extensions for multi-stream audio
+generation and classifier-free guidance (CFG).
+
+This repository accompanies [An Efficient vLLM-Based Inference Pipeline for
+Unified Audio Understanding and Generation](https://arxiv.org/abs/2607.02119),
+accepted at **Interspeech 2026**. See [Citation](#citation).
 
 > This is a modified fork, not an official vLLM release. Upstream's own README is
 > preserved verbatim at [README.vllm.md](README.vllm.md).
 
 ## Versions
 
-|  |  |
+| Component | Version |
 | --- | --- |
 | Upstream base | vLLM **v0.28.0**, tag commit `2cf0a6915ce544dc493a0990f2ea38d81601128a` (2026-08-23) |
-| This branch | `espnet-audio-v0.28.0` |
+| Default branch | `main` |
 | Docker base image | `vllm/vllm-openai:v0.28.0` |
 
 The three model implementations are Python-only, so compiled kernels come
@@ -143,11 +148,11 @@ examples/espnet/docker/build.sh --arch amd64     # or arm64, or both
 examples/espnet/docker/build.sh --arch arm64 --dry-run   # print the command only
 ```
 
-**No image has been built or published from this repository, for either
-architecture.** What is verified is the base image's architecture support, the
-aarch64 availability of every pinned wheel, and the syntax of the Dockerfile and
-build script. Runtime behaviour inside a container is not. The Docker README
-splits verified from unverified explicitly.
+The repository records static checks of the base image, dependencies and build
+scripts. A locally built image has been reported by the maintainer; its tag,
+source revision and runtime results still need to be recorded here.
+See [Docker Hub automation](examples/espnet/docker/PUBLISHING.md) for the
+build, validation and publication workflow and its setup requirements.
 
 ## What has actually been tested
 
@@ -185,7 +190,8 @@ On H100 80GB (Linux, CUDA 13 driver, Python 3.12), tensor parallel size 1:
   comparison (see MODELS.md). Their generated assets were diffed against the
   known-good directories, but neither model was **served** for this change; the
   earlier TTS/ASR/dialogue runs are recorded in the Chinese guide.
-- Docker — **not** built end-to-end; static and config checks only.
+- Docker — recorded checks cover static configuration; validation of the
+  maintainer's locally built image is pending.
 - Not covered: multi-GPU (TP>1), throughput or latency benchmarking, and formal
   audio-quality scoring. Nobody listened to the demo clips as part of producing
   them; the checks are measurements plus the Whisper cross-check.
@@ -205,3 +211,21 @@ On H100 80GB (Linux, CUDA 13 driver, Python 3.12), tensor parallel size 1:
 - [`README.vllm.md`](README.vllm.md) — upstream vLLM's README, verbatim.
 
 Licensed under Apache-2.0, the same as upstream vLLM. See [LICENSE](LICENSE).
+
+## Citation
+
+If you use this inference pipeline, please cite our Interspeech 2026 paper:
+
+```bibtex
+@inproceedings{wang2026efficient,
+  title={An Efficient {vLLM}-Based Inference Pipeline for Unified Audio Understanding and Generation},
+  author={Wang, Haoran and Tian, Jinchuan and Arora, Siddhant and Watanabe, Shinji},
+  booktitle={Interspeech 2026},
+  year={2026},
+  note={Accepted for publication},
+  eprint={2607.02119},
+  archivePrefix={arXiv},
+  primaryClass={eess.AS},
+  url={https://arxiv.org/abs/2607.02119}
+}
+```
