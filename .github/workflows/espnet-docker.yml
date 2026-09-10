@@ -100,10 +100,11 @@ jobs:
         run: |
           set -euo pipefail
           if ! examples/espnet/docker/build.sh --arch "$ARCH" --tag "$LOCAL_IMAGE" 2>&1 | tee /tmp/espnet-build.log; then
-            while IFS= read -r line; do
-              line="${line//'%'/'%25'}"
-              echo "::error title=Docker build failed::$line"
-            done < <(tail -n 35 /tmp/espnet-build.log)
+            detail=$(tail -n 45 /tmp/espnet-build.log)
+            detail="${detail//'%'/'%25'}"
+            detail="${detail//$'\n'/'%0A'}"
+            detail="${detail//$'\r'/'%0D'}"
+            echo "::error title=Docker build failed::$detail"
             exit 1
           fi
 

@@ -8,8 +8,9 @@ audio decode/encode.
 Supports **x86_64/amd64** and **ARM64/aarch64** from a single Dockerfile.
 
 For GitHub Actions builds and Docker Hub publication, see
-[PUBLISHING.md](PUBLISHING.md). Automation starts disabled and currently targets
-amd64. Its dependency check blocks publication of an inconsistent runtime.
+[PUBLISHING.md](PUBLISHING.md). Both architectures build on native GitHub-hosted
+runners. Adding the two Docker Hub secrets enables publication after successful
+validation; forward [OWNER_SETUP.md](OWNER_SETUP.md) for the owner’s setup.
 
 ## Architectures
 
@@ -57,44 +58,26 @@ must be the repo root), resolves whichever architecture the daemon is on:
 docker build -f examples/espnet/docker/Dockerfile -t espnet-vllm:v0.28.0 .
 ```
 
-Either path `COPY`s the local checkout, so the image contains exactly your
-working tree. To build from a remote instead, edit the Dockerfile: replace
-the `COPY . /workspace/vllm-fork` line with the `ARG` + `git clone` block
-in the comment above it, then pass `--build-arg VLLM_FORK_URL=...
---build-arg VLLM_FORK_REF=...`. The build args have no effect on their
-own — nothing reads them until that line is replaced.
+Both paths copy the current working tree into the image. Clone and check out a
+specific commit before building when the exact source revision matters.
 
-## What is verified, and what is not
+## Runtime and validation
 
-**Verified** (static and registry/index checks, 2026-09-03):
+The image preserves the pinned official CUDA/PyTorch binaries and installs
+`espnet==202609.post1+vllm.0.28.0`, a serving package prepared from a
+checksum-pinned source archive. Its model implementation is unchanged; its
+packaging constraints accommodate the vLLM runtime. See
+[COMPATIBILITY.md](COMPATIBILITY.md) for the precise changes and the upstream
+NCCL override handled by the dependency check.
 
-- the base image carries both `linux/amd64` and `linux/arm64`, confirmed from
-  the per-arch config blobs, with the digests above;
-- `torch==2.13.0`, `torchvision==0.28.0` and `torchaudio==2.11.0` — the pins
-  this image force-reinstalls — all publish `manylinux_2_28_aarch64` wheels as
-  well as `x86_64`, so that layer is not x86-only by availability;
-- `espnet` and `espnet_model_zoo` ship pure-Python `py3-none-any` wheels;
-- `Dockerfile` parses: first instruction is `FROM`, no unknown instructions, no
-  dangling line continuation;
-- `build.sh` passes `bash -n`, and its `--dry-run` output was inspected for
-  amd64, arm64 and both.
+Every image must pass dependency validation, imports for all three models and
+their codec/SSL dependencies, and CLI startup. GitHub repeats those checks
+offline before publication. CPU checks establish neither GPU kernel execution
+nor audio quality; actual GPU validation is recorded separately.
 
-**Runtime verification pending.** The maintainer has reported a locally built
-image, but its tag, architecture, source revision and test results have not yet
-been recorded in this repository. The 2026-09-03 checks above were static checks.
-In particular, they do not establish:
-
-- whether the aarch64 `torch` wheel resolves the same working CUDA stack inside
-  the container as the base image shipped. Modern torch pulls CUDA through
-  separate `nvidia-*` dependency wheels, so wheel size and filename cannot
-  answer this. Confirm with a real aarch64 build before relying on GPU serving
-  there.
-- the ESPnet dependency resolution, the DAC pre-warm step, and runtime
-  behaviour on either architecture.
-
-The runtime testing recorded in the getting-started guide was done on H100
-(sm90, amd64) **outside** Docker. See [PUBLISHING.md](PUBLISHING.md) for the
-dependency conflict found during the 2026-09-09 review.
+Docker Hub publication is not established until a credentialed run pushes and
+verifies the public tags. The workflow's successful build-only runs can be
+inspected before the owner supplies those credentials.
 
 ## Run
 

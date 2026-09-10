@@ -531,13 +531,10 @@ examples/espnet/docker/build.sh --arch amd64 --dry-run   # 只打印命令,不�
 无法 `--load` 进本地镜像库,所以 `--arch both` 写出一个 OCI layout 的 tar,
 不往任何地方 push。
 
-**已核对的**:基础镜像两个架构都在;这个镜像会强制重装的
-`torch==2.13.0`、`torchvision==0.28.0`、`torchaudio==2.11.0` 三个 pin 在 PyPI
-上都有 `manylinux_2_28_aarch64` 的 wheel,不只有 x86_64;`espnet` 和
-`espnet_model_zoo` 是纯 Python 的 `py3-none-any`。
-**没有核对的**:aarch64 上那个 torch wheel 装进容器之后,CUDA 那一套是否和基础
-镜像原来带的一样能用。现在的 torch 把 CUDA 拆成独立的 `nvidia-*` 依赖包,光看
-wheel 的文件名和体积回答不了这个问题,必须真的在 aarch64 上构建一次才知道。
+基础镜像按架构固定 digest。构建保留其中的 PyTorch/CUDA 组件，并安装带明确
+版本后缀的 ESPnet 推理包；具体依赖处理见
+[`docker/COMPATIBILITY.md`](docker/COMPATIBILITY.md)。依赖、模块导入和 CLI
+检查都在镜像内执行；GPU 推理和音频效果需要单独验证。
 
 不带脚本的等价写法(在仓库根目录构建,不是在 `examples/espnet/docker` 里,
 解析出来的架构就是当前 daemon 所在的架构):
@@ -546,49 +543,8 @@ wheel 的文件名和体积回答不了这个问题,必须真的在 aarch64 上�
 docker build -f examples/espnet/docker/Dockerfile -t espnet-vllm:v0.28.0 .
 ```
 
-默认这条路径把你当前的工作树 `COPY` 进镜像，所以镜像里装的就是你手上这份
-代码。如果想改成从 git clone 拉，需要动 Dockerfile 本身：把第 33 行那句
-`COPY . /workspace/vllm-fork` 换成 Dockerfile 注释里给出的 `ARG` 加
-`RUN git clone` 三行，然后才能用 `--build-arg VLLM_FORK_URL=...` 传参。光
-传 build-arg 不改文件是没有效果的。
-
-运行：
-
-```bash
-docker run --gpus all --rm -p 9811:9811 \
-    -v /path/to/checkpoints:/models \
-    -v ~/.cache/huggingface:/root/.cache/huggingface \
-    espnet-vllm:v0.28.0 \
-    /models/bagpiper_converted \
-    --served-model-name bagpiper --port 9811 \
-    --trust-remote-code --max-model-len 16384 \
-    --limit-mm-per-prompt '{"audio": 1}' --no-async-scheduling
-```
-
-镜像保留了上游的 `ENTRYPOINT ["vllm", "serve"]`，所以 `docker run` 后面
-第一个参数就是模型路径。
-
-要用的东西：
-
-- **挂载 HF 缓存**（`-v ~/.cache/huggingface:/root/.cache/huggingface`）。
-  Xcodec 和 XEUS 走这个缓存，XEUS 有 2.2 GB，不挂就每次容器启动重新下。
-- **DAC 已经预热进镜像**，占 308 MB。为什么单独处理：
-  `espnet_model_zoo` 缓存在它自己的 site-packages 目录里，不在 HF 缓存
-  里，挂 HF 缓存管不到它。
-- `VLLM_USE_V2_MODEL_RUNNER=0` 用 `ENV` 写进镜像了，不用自己传。
-- 端口按模型分：bagpiper 9811，opuslm 9812，opuslm_dialogue 9813。
-
-想在容器里用启动脚本而不是直接 `vllm serve`，覆盖 entrypoint：
-
-```bash
-docker run --gpus all --rm -p 9811:9811 \
-    -v /path/to/checkpoints:/models \
-    -v ~/.cache/huggingface:/root/.cache/huggingface \
-    --entrypoint bash espnet-vllm:v0.28.0 \
-    -c 'MODEL_PATH=/models/bagpiper_converted bash /workspace/vllm-fork/examples/espnet/serve_bagpiper.sh'
-```
-
-更多细节在 `examples/espnet/docker/README.md`。
+默认把当前工作树 `COPY` 进镜像。需要固定版本时，先 clone 仓库并 checkout
+到指定 commit，再构建。
 
 ---
 
@@ -600,23 +556,25 @@ docker run --gpus all --rm -p 9811:9811 \
 配置完成后，相关代码更新和每周定时任务都会触发它，也可以手动运行。
 不需要额外开通 Docker Hub 的 Automated Builds。
 
-首次配置需要在 Docker Hub 选择 `espnet` namespace，创建名为 `vllm` 的公开仓库；
-在 GitHub 的 `espnet/vllm` 仓库创建 `docker` environment，放入
-`DOCKERHUB_USERNAME` 和 `DOCKERHUB_TOKEN` secrets；再注册一台原生 x86_64
-Docker 构建机器，并设置 `ESPNET_DOCKER_RUNNER`。构建机器的 Docker 数据目录
-需要至少 100 GiB 空闲空间。GitHub 和 Docker Hub 的组织权限彼此独立，
-`espnet/espnet` 仓库中的 environment secrets 也不会自动共享过来。
+organization owner 只需完成两件事：在 Docker Hub 的 `espnet` 下面创建公开
+仓库 `vllm`，让现有 ESPnet CI 账号有推送权限；再让 GitHub 的 `espnet/vllm`
+能使用 `DOCKERHUB_USERNAME` 和 `DOCKERHUB_TOKEN` 两项 secrets。如果已经是
+organization secrets，只需把这个仓库加入可访问列表。另一个仓库的 environment
+secrets 不会自动继承，无法从 GitHub 读回原 token。
 
-先手动运行 `publish=false` 验证构建和运行环境，首次成功发布之后，再把
-`ESPNET_DOCKER_ENABLED` 与 `ESPNET_DOCKER_PUBLISH` 两个仓库变量设为 `true`。
-此后可用 `docker pull espnet/vllm:latest` 获取最新通过检查的镜像，或使用带
-commit/run ID 的 tag 固定版本。当前自动发布只覆盖 amd64；ARM 可以放在同一个
-仓库，但需要补齐原生 ARM 构建和验证后再发布包含两种架构的 manifest。
+构建使用 GitHub 提供的原生 x86 和 ARM 机器。无需自行提供服务器、注册 runner
+或设置启用变量。两种架构检查都通过后才更新同一个 `latest`，拉取时 Docker 会
+自动选择机器对应的架构。没有凭据时只构建和检查；填好后，下次相关 `main`
+更新或每周一 03:23 UTC 的任务会自动发布，也可以手动运行 `publish=true`。
 
-**目前尚未完成 Docker Hub 首次发布。** Dockerfile 的 ESPnet 与 vLLM 依赖约束
-存在冲突，仍需选择并验证兼容的运行环境；workflow 的依赖检查会阻止发布不一致的
-镜像。完整操作命令、token 类型与依赖说明见
-[`docker/PUBLISHING.md`](docker/PUBLISHING.md)。
+首次发布成功后可用 `docker pull espnet/vllm:latest`。需要固定版本时使用带
+commit/run ID 的 tag 或镜像 digest。将 `ESPNET_DOCKER_PUBLISH=false` 设为
+仓库变量可以暂停发布并保留构建检查。
+
+可以直接转发给 owner 的英文说明见
+[`docker/OWNER_SETUP.md`](docker/OWNER_SETUP.md)，完整流程见
+[`docker/PUBLISHING.md`](docker/PUBLISHING.md)。仓库代码就绪不代表 Docker Hub
+已经有公开镜像，首次推送仍需要上述凭据。
 
 ## 五、验证到了哪一步
 
