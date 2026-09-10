@@ -1,10 +1,9 @@
 # Bagpiper demo audio
 
-Real output from this fork, generated on one H100 80GB on 2026-09-03. Every
-prompt below was hand-written for this demo — none comes from a training set or
-any third-party corpus, so these files are safe to redistribute.
+Audio samples generated with this fork on an H100 80GB GPU on 2026-09-03.
+The prompts were written for these examples.
 
-## How they were made
+## Generation settings
 
 | | |
 | --- | --- |
@@ -18,7 +17,7 @@ any third-party corpus, so these files are safe to redistribute.
 
 All six requests returned audio with `finish_reason=stop`; none was truncated.
 
-## The clips
+## Samples
 
 Bagpiper takes a **scene description** with any spoken line quoted inside it —
 not a bare sentence to read. These prompts are the shape it expects.
@@ -45,11 +44,11 @@ on/off pair with the clip above. CFG 3 is what the released
 
 > A precise male voice, studio-recorded and close-miked, dictates slowly and clearly: `'Your order total is one thousand two hundred thirty-four dollars and fifty-six cents, shipping on July fourth.'` No background noise or music.
 
-## Did it say the right words?
+## Automatic transcription
 
 Transcribed with `openai/whisper-base` and compared against the quoted text.
-This is an **auxiliary** check, not a human listening test — Whisper is small and
-makes its own mistakes.
+Automatic transcription provides an auxiliary content check and may contain
+recognition errors. It does not replace perceptual evaluation.
 
 | clip | Whisper heard | word error |
 | --- | --- | --- |
@@ -59,25 +58,15 @@ makes its own mistakes.
 | train_announcement | `The next train to Boston departs from Platform 9.` | 11.1% |
 | numbers_and_date | `Your order total is $1,234.56, shipping on July 4.` | 63.2% |
 
-Read those numbers carefully. Every non-zero figure is **numeral orthography**,
-not a speech error: Whisper writes "18" where the prompt said "eighteen",
-"Platform 9" for "platform nine", and `$1,234.56` for the spoken amount. The
-last row scores badly by raw word overlap while being semantically exact — the
-model did say the money and the date correctly. After normalising digits to
-words the content matches throughout.
+Raw word error rates are sensitive to numeral formatting. For example, the
+transcriptions use "18" for "eighteen", "Platform 9" for "platform nine", and
+`$1,234.56` for the spoken amount. These differences affect word overlap and
+should be considered when interpreting the table.
 
 ## Measured properties
 
-Checked, not assumed: all five files are 16 kHz mono PCM_16 with the WAV byte
-identity `size == 44 + 2*frames`; none is silent (peak 0.53–1.00, active frames
-72–96%); implied speaking rates are 2.1–4.0 words per second, inside the natural
-band for read-aloud English.
-
-Three clips touch full scale on a handful of samples (2, 2 and 7 samples
-respectively) — audible clipping is unlikely at that count, but it is there and
-worth knowing rather than hiding.
-
-## What was not done
-
-Nobody sat and listened to these files as part of producing them. The claims
-above are measurements plus the Whisper cross-check. Judge the quality by ear.
+All five files use 16 kHz mono PCM_16 audio and satisfy
+`size == 44 + 2*frames`. Peak amplitudes range from 0.53 to 1.00, with active
+frames accounting for 72–96% of each clip. Implied speaking rates are
+2.1–4.0 words per second. Three clips contain 2, 2, and 7 full-scale samples,
+respectively. No formal listening study was conducted for these examples.

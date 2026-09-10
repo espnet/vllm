@@ -1,23 +1,15 @@
-# 在 vLLM 上跑 bagpiper / opuslm / opuslm_dialogue
+# ESPnet 音频语言模型使用指南
 
-这份文档讲清一件事：怎么在一台 H100 机器上，把这三个语音语言模型从
-checkpoint 变成一个能收 HTTP 请求、会返回音频的服务。读它不需要知道
-这些模型以前在哪个 vLLM 分支上跑过。
+本文介绍 Bagpiper、OpusLM 和 OpusLM-dialogue 的模型转换、服务部署和客户端
+调用。本仓库的默认分支为 `main`，基于 vLLM 0.28.0。项目总览见
+[`README.md`](../../README.md)。
 
-代码在分支 `espnet-audio-v0.28.0` 上，基线是上游 tag `v0.28.0`
-（commit `2cf0a6915c`）。仓库根目录的 [`README.md`](../../README.md) 是简短
-版总览，这里是完整操作细节。
-
-**先记住一条,后面会反复用到:bagpiper 不是文本转语音引擎。** 它按「场景描述」
-生成音频,要说的话用引号嵌在描述里,例如「A calm male voice says: 'Your
-package will arrive on Tuesday.'」。写成「把这句话读出来:某句话」是训练时
-没有的形状,会返回音频但不是忠实朗读。细节见第三节和第六节。
+Bagpiper 使用场景描述生成音频。需要指定台词时，将台词放在场景描述的引号中，
+例如：`A calm male voice says: 'Your package will arrive on Tuesday.'`。
 
 ---
 
 ## 名词表
-
-先把后面反复出现的词定义清楚。
 
 | 词 | 意思 |
 | --- | --- |
@@ -48,7 +40,7 @@ bagpiper 有一个需要提前知道的行为：它会先输出一段 Qwen3 风�
 
 ### opuslm
 
-主干是 Olmo3。输入音频走 XEUS 加 kmeans，输出音频走 ESPnet DAC
+主干是 OLMo-2-7B。输入音频走 XEUS 加 kmeans，输出音频走 ESPnet DAC
 （HF tag `ftshijt/espnet_codec_dac_large_v1.4_360epoch`）。两个 codec 都是
 每帧 320 个采样点，16 kHz 下就是 50 Hz。9 条流。不支持 CFG。
 
@@ -110,7 +102,7 @@ n 条流在模型的 `compute_logits` 里用一个私有的 top-k 采样器采�
 
 ## 二、最短完整路径
 
-### 先说清楚:官方发布的权重都不能直接喂给 vLLM
+### Checkpoint 格式
 
 三个模型在 Hugging Face 上发布的都是**原生 ESPnet 权重**,没有 `config.json`、
 没有 tokenizer、也没有 safetensors。`espnet/bagpiper-sft` 的 model card 自己就写
@@ -123,74 +115,31 @@ is claimed」。所以**必须做一步参数转换**,这一节的 `convert/` �
 | `opuslm` | [`espnet/OpusLM_7B_Anneal`](https://huggingface.co/espnet/OpusLM_7B_Anneal) | `model.pth` |
 | `opuslm_dialogue` | [`espnet/multi_turn_SDS_RLAIF`](https://huggingface.co/espnet/multi_turn_SDS_RLAIF) | `2epoch.pth` |
 
-每个模型到底出自哪个 repo、哪个 revision,以及这些结论是怎么用哈希和逐张量比对
-**证明**出来的(不是猜的),都写在 [`MODELS.md`](MODELS.md) 里。那份文档还记了一件
-要紧的事:**`espnet/bagpiper-sft` 在这里出不了音频**(同一个服务、同一批请求,
-6 条里 0 条返回音频),想做语音就用 `bagpiper-tts-sft`。
+官方 checkpoint 的来源、版本、哈希和转换规则见 [`MODELS.md`](MODELS.md)。
+语音生成使用 `espnet/bagpiper-tts-sft`；当前集成不支持
+`espnet/bagpiper-sft` 的音频输出。
 
-`config.json` 和 tokenizer 官方确实没发,但它们不用别人给:转换脚本会自己造。
-造的依据是公开、锁死版本的东西 —— 模型自己的训练 YAML 指名了用哪个 backbone,
-脚本就从那个 backbone 的仓库取 tokenizer 和 transformer 的几何参数,取的时候按
-git revision 加 sha256 双重锁定。所以一台干净机器上只要有官方权重就能转,不需要
-任何预先存在的目录。每个文件到底从哪来,`MODELS.md` 里有一张表。
+转换脚本从固定 revision 的公开资源生成 `config.json` 和 tokenizer，并检查
+资源的 SHA256。无需提供已有的模型配置目录。
 
 ### 0. 环境
 
-要求：Linux、NVIDIA H100（sm90）、CUDA 13 驱动、Python 3.12。
+推荐使用本仓库的 Docker 镜像，以保持 vLLM、CUDA、PyTorch 和 ESPnet
+依赖一致。镜像支持 Linux amd64 和 arm64；GPU 功能检查覆盖 H100 和 GB200。
+构建和启动命令见 [`docker/README.md`](docker/README.md)，依赖版本说明见
+[`docker/COMPATIBILITY.md`](docker/COMPATIBILITY.md)。
 
-```bash
-python3 -m venv ~/venvs/espnet-vllm
-source ~/venvs/espnet-vllm/bin/activate
+以下转换命令在安装了本 fork 及 ESPnet 依赖的环境中，从仓库根目录执行。
+镜像内的仓库路径为 `/workspace/vllm-fork`。启动脚本会检查 `PATH` 中的
+`vllm` 是否来自本 fork。
 
-# 装这个 fork。VLLM_USE_PRECOMPILED=1 让它复用官方 v0.28.0 wheel 里
-# 已经编好的 CUDA kernel，几分钟装完；不加这个变量要从源码编译几小时。
-cd /path/to/this/repo
-VLLM_USE_PRECOMPILED=1 pip install -e .
+### 1. 下载权重
 
-# 音频必须的两个包。espnet 提供 codec 的实现，espnet_model_zoo 负责
-# 解析 DAC 的 model tag——只装 espnet 的话，第一次解码音频会抛
-# ModuleNotFoundError。
-pip install espnet espnet_model_zoo
-```
+使用上表中的 ESPnet 官方 checkpoint。各模型的下载和转换命令见下一节。
+将 `MODEL_PATH` 指向转换后的模型目录，该目录应包含 `config.json`、
+tokenizer 文件和 safetensors 权重。
 
-如果要用音频**输入**（bagpiper 的 audio_understand、opuslm 的 ASR 和声音
-克隆、opuslm_dialogue 的语音对话），还需要 `joblib` 和 `scikit-learn` 来
-加载 XEUS 的 kmeans 模型。`espnet` 一般会连带装上，没有就补装。
-
-**PATH 要检查一遍。** 如果机器上另有一份系统 vllm（比如
-`/usr/local/bin/vllm`），它不认识这三个模型，服务会以 model type 未知
-失败。启动脚本里有一道前置检查会在这种情况下直接报错退出，不会让你跑起
-一个半残的服务。把 venv 的 bin 放在 PATH 最前面就行：
-
-```bash
-export PATH=~/venvs/espnet-vllm/bin:$PATH
-```
-
-### 1. 下权重
-
-三个模型的权重都在 HF 仓库 `anonymous-release/vLLM_alm` 的 `main` 分支
-上，分别在 `bagpiper/`、`OpusLM/`、`OpusLM_dialogue/` 三个子目录里。
-
-```bash
-# bagpiper：一个 DeepSpeed 分片 checkpoint 加上一整套 tokenizer 文件
-hf download anonymous-release/vLLM_alm --include "bagpiper/*" \
-    --local-dir ~/ckpt/vLLM_alm
-
-# opuslm：ESPnet 的 model.pth 加 tokenizer
-hf download anonymous-release/vLLM_alm --include "OpusLM/*" \
-    --local-dir ~/ckpt/vLLM_alm
-
-# opuslm_dialogue：直接就是 safetensors，不用转换
-hf download anonymous-release/vLLM_alm --include "OpusLM_dialogue/*" \
-    --local-dir ~/ckpt/vLLM_alm
-```
-
-**注意下载出来的目录会多一层。** `--local-dir ~/ckpt/vLLM_alm` 加
-`--include "OpusLM_dialogue/*"` 得到的模型目录是
-`~/ckpt/vLLM_alm/OpusLM_dialogue`，`MODEL_PATH` 要指到这一层，指到
-`~/ckpt/vLLM_alm` 会启动失败。
-
-codec 和 SSL 的权重会在**服务启动时**从 HF 拉取，不是等到第一个请求：
+音频处理还需要以下 codec 和 SSL 权重；首次加载时需要联网或预先填充缓存：
 
 - Xcodec（bagpiper 用）：`hf-audio/xcodec-hubert-general`
 - XEUS 和 kmeans（opuslm 系列的音频输入用）：`espnet/xeus`，一共约 2.3 GB
@@ -327,9 +276,7 @@ python client_bagpiper.py --task text --prompt "What is 2+2?"
 ffmpeg -i 任意音频文件 -ar 16000 -ac 1 -c:a pcm_s16le test.wav
 ```
 
-我实测用的那段就是这样从一个 ogg 转出来的，长约 16 秒、510,380 字节，内容
-是一段清晰的英语朗读。手边没有素材的话，用 opuslm 自己的 TTS 先合成一段也
-可以，它的输出正好就是 16 kHz 单声道 WAV：
+也可以使用 OpusLM TTS 生成一段 16 kHz 单声道 WAV 作为输入：
 
 ```bash
 python client_opuslm.py --task tts --prompt "Hello world" --out test.wav
@@ -356,11 +303,8 @@ python client_bagpiper.py --task audio_understand \
 
 ### bagpiper：生成音频
 
-**先看清楚一件事:bagpiper 不是文本转语音引擎。** 它是一个按描述生成音频的
-模型。它的训练数据把每一条请求都写成一段自然语言的场景描述,要说的话用引号
-嵌在描述里面。写成「把这句话读出来:某句话」这种指令是训练时没有的形状 ——
-它照样会返回音频,但那段音频不是对这句话的忠实朗读。这个错误曾经导致一整批
-样例听起来含混不清。
+Bagpiper 根据自然语言场景描述生成音频。请求应描述声音、环境和说话方式，
+并用引号指定台词。客户端默认 prompt 使用这一格式。
 
 客户端内置的默认 prompt 已经是一个符合分布的例子,直接跑就行:
 
@@ -375,13 +319,7 @@ python client_bagpiper.py --task tts --out tts.wav \
     --prompt "A calm male voice, close-miked in a quiet studio, says: 'Your package will arrive on Tuesday.' No background noise."
 ```
 
-09-02 在 H100 上对着发布用的 checkpoint 实测,默认 prompt
-(`'Hello, how are you today?'` 那一条)出 615 个 completion token、
-`audio: 1.80s @ 16000 Hz, 1 ch`,`finish_reason=stop`,折算语速每秒 2.78 个
-词,落在正常朗读的区间里。同一批里另外两条较长的句子是每秒 3.06 和 2.84 个
-词。证据在 `terminal_docs/audio_samples/bagpiper_authoritative_validation/`。
-
-模型会在 `<think>` 里先给自己定一个时长目标,再渲染,两者通常对得上。
+示例音频、完整 prompt 和生成参数见 [`demo_assets/README.md`](demo_assets/README.md)。
 
 ### bagpiper：生成音频加 CFG
 
@@ -489,19 +427,12 @@ VLLM_ESPNET_AUDIO_DEBUG`。这是 vLLM 的环境变量注册表不认识这个�
 
 ## 四、在个人 PC 上 build 和 run Docker
 
-2026-09-10，x86_64 和 ARM64 镜像均已在原生 GitHub runner 上完成实际构建，
-并通过镜像内的离线依赖、导入和 CLI 检查。同一份 Docker 配方也已构建成集群
-测试镜像，用于 H100 和 GB200 上的实际推理验证。具体版本、任务和结果见
-[`docker/VALIDATION.md`](docker/VALIDATION.md)。Docker Hub 的首次公开发布
-仍需先完成下面的组织权限和 secret 配置。
-
-镜像从上游官方镜像 `vllm/vllm-openai:v0.28.0` 派生，H100 属于 sm90，上游
-wheel 已经覆盖，所以不需要本地编译 CUDA kernel。
+镜像基于 `vllm/vllm-openai:v0.28.0`，复用上游 CUDA 扩展，并安装本 fork
+和 ESPnet 音频运行时。依赖与平台说明见 [`docker/README.md`](docker/README.md)。
 
 ### 两种架构:x86_64/amd64 与 ARM64/aarch64
 
-**这一点是查过 registry 的,不是猜的。** 09-03 用 Docker Hub 的 registry API
-查过 `vllm/vllm-openai:v0.28.0`,它确实是一个多架构的 manifest list:
+`build.sh` 使用以下固定 digest 选择对应架构的基础镜像：
 
 | 项 | 值 |
 | --- | --- |
@@ -509,15 +440,7 @@ wheel 已经覆盖，所以不需要本地编译 CUDA kernel。
 | `linux/amd64` | `sha256:2286e8533ca8b6bc777594bae30524f1426ba46ca21797524e06df6a94b06635` |
 | `linux/arm64` | `sha256:2a7cde230b59f3ce6cab33dd245ba6bee41aa87b38c9fe84f966ff24016813ce` |
 
-两个架构各自的 image config blob 也拉下来看过,分别写着 `architecture: amd64`
-和 `arm64`,`os: linux`。所以不是 index 单方面声称有两个平台,两个都是真的。
-
-因此这里只有**一个** Dockerfile,不是每个架构一份 —— 架构之间唯一的差别就是
-基础镜像钉哪个 digest,这件事交给 `build.sh` 显式指定。两份只差一行 `FROM` 的
-Dockerfile 迟早会各自漂移,所以没有那样做。
-
-构建脚本会按 digest 钉住基础镜像,这样几个月后重建拿到的还是同一批字节,
-即使 `v0.28.0` 这个 tag 被重新推过:
+两个架构使用同一个 Dockerfile。构建脚本按 digest 固定基础镜像：
 
 ```bash
 examples/espnet/docker/build.sh --arch amd64     # x86_64
@@ -572,111 +495,24 @@ secrets 不会自动继承，无法从 GitHub 读回原 token。
 commit/run ID 的 tag 或镜像 digest。将 `ESPNET_DOCKER_PUBLISH=false` 设为
 仓库变量可以暂停发布并保留构建检查。
 
-可以直接转发给 owner 的英文说明见
+凭据配置步骤见
 [`docker/OWNER_SETUP.md`](docker/OWNER_SETUP.md)，完整流程见
 [`docker/PUBLISHING.md`](docker/PUBLISHING.md)。仓库代码就绪不代表 Docker Hub
 已经有公开镜像，首次推送仍需要上述凭据。
 
-## 五、验证到了哪一步
+## 五、兼容性与验证
 
-2026-09-10 补测了 Bagpiper 的抢占恢复：服务端现在按请求和绝对 token 位置
-保留生成音频的其余七条流，在重新计算 KV cache 时恢复对应 embedding；
-分块恢复尚未到生成边界时，不采样新音频流或推进生成阶段。
-同一 H100、同一问候语和 seed 下，正常生成与修复前的 token、codec token、
-WAV 完全一致，音频长 1.22 秒。第 40 个音频帧后强制抢占，完整恢复生成
-1.22 秒音频，每块 128 token 的恢复生成 1.38 秒音频，均能返回最终 WAV。
-抢占结果尚不与无抢占逐 token/逐样本一致；这些结果不是全面音质评测。
-混合批次、单 token 分块和 CFG 主/影子请求的位置隔离由单元测试覆盖，
-尚未用 GPU 验证全部并发/CFG 组合。该修复只覆盖 Bagpiper，
-不代表 OpusLM 或 OpusLM-dialogue 的抢占恢复已经验证。
+镜像内的依赖、模型导入和 CLI 检查由 GitHub Actions 执行。H100 / amd64 和
+GB200 / arm64 的单 GPU 功能检查覆盖 Bagpiper 语音生成、OpusLM TTS / ASR，
+以及 OpusLM-dialogue 的文本和语音对话。版本、参数和覆盖范围见
+[`docker/VALIDATION.md`](docker/VALIDATION.md)。
 
-平台：8×H100 80GB HBM3，Linux，overlay 文件系统。
+默认配置使用 V1 model runner 和同步调度。多 GPU、吞吐性能和正式音质评测
+不在上述容器功能检查的范围内。
 
-版本：Python 3.12.3，vLLM 0.28.0+precompiled（editable 安装），
-torch 2.13.0+cu130，transformers 5.16.1，espnet 202511，
-espnet-model-zoo 0.1.7，librosa 1.0.0，soundfile 0.14.0，
-scikit-learn 1.9.0，joblib 1.6.0。
-
-**转换**：
-
-| 模型 | 输入 | 结果 |
-| --- | --- | --- |
-| bagpiper | 真实的 `mp_rank_00_model_states.pt` | 转出 4 分片共 17 GB，服务起得来，四个任务全通 |
-| opuslm | 真实的 `model.pth` | 转出 3 分片共 14 GB，键集与参考完全一致（`KEYSETS_EQUAL`），逐张量比对 356 个张量零不匹配、最大绝对差 0.0 |
-| opuslm_dialogue | 不需要转换 | 直接从下载目录起服务 |
-
-chat template 的改写单独验过：把参考的 `tokenizer_config.json.orig` 拿
-出来，跑一遍脚本里的 `fix_chat_template`，产物与已验证服务实际加载的那份
-逐字段一致（模板一致、键集一致、其他字段零差异）。
-
-**推理**：三个模型九条路径全部在 H100 上真实跑过，结果见第三节。用的是
-仓库里的参考客户端，不是绕过客户端的私有脚本。
-
-opuslm 那三条路径（TTS、ASR、textlm）的数字是在最后一个代码提交上重测
-的。早先那一轮跑在 chat template 修好之前，模板里的 `<|user|>` 会被当普通
-文本编码进 prompt，token 计数和生成长度都不一样，所以旧数字已经不适用于
-现在这份代码。第三节写的是重测的结果。
-
-**其他实测过的点**：
-
-- 两个 codec 在真实权重上的编解码往返（CPU）通过。
-- 偏移量往返和逐流反交织精确无误
-  （`OFFSET_ROUNDTRIP_EXACT`、`DEINTERLEAVE_STREAM0_EXACT`、
-  `DEINTERLEAVE_STREAM18_EXACT`）。
-- DAC 预热进镜像的步骤通过（`PREWARM_OK`，308 MB）。
-- 启动脚本的前置检查双向验过：认得出这个 fork，也拒绝得掉系统 vllm。
-- 音频输出对同一输入是可复现的。同一段输入音频在两个独立的服务进程里跑
-  `audio_dialogue`，得到的 WAV 字节完全相同（md5 都是
-  `f4d0640e406ee55c7987c5cfc414c015`）。换一段输入音频，结果就变
-  （md5 `5cfdc5135b97fc91672885756523460b`，时长 8.02 秒对 15.08 秒）。
-  所以这是可复现的采样，不是写死的输出。
-- 异步调度试过一条路径。opuslm 的 TTS 在 `ASYNC_SCHEDULING=1`（上游默认）
-  和 `ASYNC_SCHEDULING=0`（脚本默认）下各跑一次，prompt token、completion
-  token、音频时长三个数字完全一样，两份 WAV 的 md5 也一样
-  （`9f4a1ee1225c1c8ef435e0ae82a49f0c`）。开着异步调度时相位机、EOS 推迟
-  和逐流采样都正常工作。其余八条路径没有在异步调度下逐条复测。
-- 三个 tracer 在最后一个代码提交上都出过东西。`[espnet-stop]` 打出
-  `n_out=59 … defer=True` 然后 `n_out=68 … defer=False`，正好差 9 步，和
-  `delay_steps=8` 对得上；同一行还打出 `prompt_head=[5, 82, 35]`，这就是
-  ESPnet 要的那个布局（sos/eos、纯 TTS 的 task token、text_bpe_start）。
-  ASR 请求打的是 `prompt_head=[5, 80, 34] … is_tts=False defer=False`，
-  换成了 ASR 的 task token 和 codec_ssl_start。`[espnet-codec]` 打出 8 条
-  流全部 `outside=0/58`。
-
-**测试**：单元测试只能在装了 transformers 5 的环境里跑。本地机器上是
-transformers 4，`vllm/transformers_utils/config.py` 会直接抛
-`ImportError`，所以全部 pytest 都在 H100 机器的那个 venv 里跑。
-
-针对这三个模型新增的五个测试文件（`tests/model_executor/test_bagpiper.py`、
-`tests/model_executor/test_opuslm.py`、`tests/tokenizers_/test_opuslm.py`、
-`tests/tokenizers_/test_registry.py`、`tests/v1/core/test_opuslm_stop.py`）
-在最后一个代码提交上复跑过，结果是 `38 passed, 16 warnings in 12.90s`。
-
-除了这五个文件，还跑了一轮更宽的回归，覆盖 `tests/v1/core`、
-`tests/tokenizers_`、`tests/model_executor`、`tests/transformers_utils`：
-
-```text
-1 failed, 1142 passed, 223 skipped, 16 warnings, 94 errors in 1476.73s (0:24:36)
-```
-
-那 95 条不通过的用例，全部与本分支无关，逐条查过来源：
-
-- 94 个 error 里有 92 个来自 `tests/tokenizers_/test_detokenize.py`，它按
-  `meta-llama/Llama-3.2-1B-Instruct` 和 `mistralai/Pixtral-12B-2409` 做参
-  数化。日志里报 `GatedRepoError: 401` 和
-  `Cannot access gated repo`，原因是这台机器上的 HF token 没有这两个受限
-  仓库的访问权。
-- 剩下 2 个 error（`tests/v1/core/test_scheduler_e2e.py` 的
-  `test_concurrent_partial_prefill` 和 `test_prefix_cache_stats_is_recorded`）
-  加上唯一那 1 个 failed（`tests/v1/core/test_reset_prefix_cache_e2e.py::test_reset_prefix_cache_e2e`）
-  报的是同一件事：`Free memory on device cuda:0 (9.92/79.18 GiB) on startup
-  is less than desired GPU memory utilization`。那一轮回归跑的时候，我自己
-  的三个服务正占着 GPU 0 到 2。这两个文件本分支一行都没改过
-  （`git diff --stat v0.28.0..HEAD` 对这两个路径为空）。
-
-为了不把这条留成推断，我把三个服务停掉、确认 8 张卡都回到 0 MiB，再在空闲
-GPU 上单独复跑这两个文件，结果是 `3 passed, 15 warnings in 57.52s`。所以那
-三条确实是显存占用导致的，不是代码缺陷。
+Bagpiper 的抢占恢复会按绝对 token 位置回放其余音频流。完整与分块恢复均有
+单 GPU 回归检查，但恢复后的波形不保证与无抢占生成逐样本一致。OpusLM 系列
+的抢占恢复及全部并发 / CFG 组合尚未完成 GPU 验证。
 
 ---
 
@@ -710,15 +546,6 @@ description of the audio you will generate.
 `<think>` 加文本段加 codec 帧的顺序。所以 `client_bagpiper.py` 的 `tts` 和
 `tts_cfg` 把 `--system` 默认设成它(常量 `DEFAULT_TTS_SYSTEM`),要关掉传
 `--system ''`。
-
-**这里曾经有一处错误的说法,现已更正。** 本文档和客户端此前把默认 system
-message 写成 `You are a helpful assistant.`,并声称「这也是上游参考客户端每个
-请求都在发的东西」。这个说法是错的:在上游那份打包材料里,这个字符串只出现
-过一次,在 `scripts/serve_cfg_1.sh` 第 17 行的 `#` 注释块里,是一段被简写过的
-curl 示例。真正可运行的参考客户端 `scripts/client_all.py` 根本没有硬编码任何
-system 轮,它是从数据集里取的,而数据集里永远是上面那一段长 prompt。用错的
-system message 加上「把这句话读出来」这种 prompt,是先前那批样例听起来含混
-不清的原因。
 
 另外这两个任务的 `--max-tokens` 默认是 12000,和参考客户端一致
 (`client_all.py` 第 33 行)——给小了,`<think>` 加文本段就把预算吃光了,

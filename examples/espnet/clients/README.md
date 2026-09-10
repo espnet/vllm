@@ -30,23 +30,13 @@ python client_bagpiper.py --task tts --out tts.wav \
 python client_bagpiper.py --task tts_cfg --cfg 3.0 --out tts_cfg.wav
 ```
 
-**Bagpiper is not a text-to-speech engine.** It is a descriptive audio
-generator: its training data phrases every request as a natural-language
-description of a scene, with any spoken content quoted inside that
-description. A `"Read this aloud: <sentence>"` instruction is out of
-distribution — it still returns audio, but the audio is not a faithful
-reading of the sentence. That mistake produced a whole batch of
-unintelligible samples before it was caught.
+Bagpiper generates audio from a natural-language scene description, with
+spoken content quoted inside the description. Use this format to specify
+the voice, recording environment, and speech content.
 
-`tts` and `tts_cfg` therefore default `--system` to `DEFAULT_TTS_SYSTEM`,
-the constant 364-char audio-generation system prompt that every sampled
-entry of the training data carries. Keep it — it is what puts the model
-into think-then-describe-then-render mode. `--system ''` opts out.
-
-Validated 2026-09-02 against the release checkpoint on an H100: 5/5
-requests returned audio, all `finish_reason=stop`, and speaking rates of
-2.78/3.06/2.84 words per second where measurable. Evidence in
-`terminal_docs/audio_samples/bagpiper_authoritative_validation/`.
+`tts` and `tts_cfg` use the audio-generation system prompt
+`DEFAULT_TTS_SYSTEM` by default. `--system ''` disables it. Example prompts
+and generated audio are available in [demo_assets](../demo_assets/README.md).
 
 ## client_opuslm.py
 
@@ -74,12 +64,15 @@ python client_opuslm_dialogue.py --task audio_dialogue \
 
 # Text dialogue (task token 88)
 python client_opuslm_dialogue.py --task text_dialogue \
-    --text "How are you today?" --out reply.wav
+    --text "How are you today?"
 
 # With a speaker prompt controlling the assistant voice
 python client_opuslm_dialogue.py --task audio_dialogue \
     --speaker-audio /path/to/speaker.wav --audio /path/to/test.wav
 ```
+
+Text dialogue returns text without audio. Use `audio_dialogue` for a spoken
+response.
 
 ## client_bagpiper_stress.py
 

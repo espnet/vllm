@@ -6,8 +6,6 @@ ESPnet serving package, `espnet==202609.post1+vllm.0.28.0`.
 The PyPI ESPnet training distribution declares `torch>=2.9.1,<2.12` and
 `setuptools<74`. vLLM 0.28 requires torch 2.13 and setuptools 77 or newer on
 Python 3.12. Installing both unchanged cannot satisfy the dependency resolver.
-The earlier Dockerfile forced torch back to 2.13 after installing ESPnet, which
-left that declared conflict in the environment.
 
 `prepare_espnet.py` starts from the checksum-pinned ESPnet 202609.post1 source
 archive. It pins torch 2.13.0, torchaudio 2.11.0 and sentencepiece 0.2.2,
@@ -32,7 +30,7 @@ before and after installation. There is no forced torch replacement. The source
 and these scripts remain in `/workspace/vllm-fork/examples/espnet/docker` inside the image.
 
 Publication requires the built image to pass dependency, import and CLI
-checks. Actual inference for all three supported models has also been checked
+checks. Functional inference for all three supported models has been checked
 on H100 and GB200; see [VALIDATION.md](VALIDATION.md). Repeat GPU validation
 when changing this package variant or the CUDA runtime. CPU checks alone do
 not establish CUDA ABI compatibility or audio generation quality.

@@ -1,46 +1,30 @@
-# ESPnet audio-LM docker image
+# ESPnet Docker image
 
-Derives from `vllm/vllm-openai:v0.28.0`, swaps in this fork's Python code
-(native extensions are reused from the official v0.28.0 wheel — the fork
-is Python-only), and adds the ESPnet runtime dependencies for OpusLM
-audio decode/encode.
+The image packages this fork with the ESPnet audio runtime on top of
+`vllm/vllm-openai:v0.28.0`. It reuses the upstream native CUDA extensions and
+supports Linux amd64 and arm64.
 
-Supports **x86_64/amd64** and **ARM64/aarch64** from a single Dockerfile.
+See [PUBLISHING.md](PUBLISHING.md) for automated builds and Docker Hub tags,
+and [OWNER_SETUP.md](OWNER_SETUP.md) for credential configuration.
 
-For GitHub Actions builds and Docker Hub publication, see
-[PUBLISHING.md](PUBLISHING.md). Both architectures build on native GitHub-hosted
-runners. Adding the two Docker Hub secrets enables publication after successful
-validation; forward [OWNER_SETUP.md](OWNER_SETUP.md) for the owner’s setup.
+## Base images
 
-## Architectures
+`build.sh` selects the architecture-specific base image by digest:
 
-The base image is a genuine multi-arch manifest list. Verified against the
-Docker Hub registry API on 2026-09-03 — not assumed:
-
-| | |
+| Platform | Digest |
 | --- | --- |
-| `mediaType` | `application/vnd.docker.distribution.manifest.list.v2+json` |
-| index digest | `sha256:61fc8a896b0a4fbbbdc063bc4b0dbc25ce98e02b5050c24aeb7830ac02039b14` |
+| Multi-platform index | `sha256:61fc8a896b0a4fbbbdc063bc4b0dbc25ce98e02b5050c24aeb7830ac02039b14` |
 | `linux/amd64` | `sha256:2286e8533ca8b6bc777594bae30524f1426ba46ca21797524e06df6a94b06635` |
 | `linux/arm64` | `sha256:2a7cde230b59f3ce6cab33dd245ba6bee41aa87b38c9fe84f966ff24016813ce` |
 
-Each per-arch **image config blob** was fetched too, and reports
-`architecture: amd64` / `arm64` with `os: linux`. So the index is not merely
-claiming two platforms — both are real.
-
-That is why there is one Dockerfile rather than two. The only
-per-architecture input is which base digest to pin, and `build.sh` supplies it
-explicitly. Two near-identical Dockerfiles differing in one `FROM` line would
-drift apart; this keeps the architectures visible without the duplication.
-
 ## Build
 
-`build.sh` pins the base by digest, so a rebuild months from now uses the same
-bytes even if the `v0.28.0` tag is re-pushed:
+`build.sh` pins the base image independently of changes to the upstream tag.
+Run from the repository root:
 
 ```bash
-examples/espnet/docker/build.sh --arch amd64     # x86_64, digest-pinned, --load
-examples/espnet/docker/build.sh --arch arm64     # aarch64, digest-pinned, --load
+examples/espnet/docker/build.sh --arch amd64 --tag espnet-vllm:v0.28.0
+examples/espnet/docker/build.sh --arch arm64 --tag espnet-vllm:v0.28.0
 examples/espnet/docker/build.sh --arch both      # multi-platform, OCI layout
 examples/espnet/docker/build.sh --arch amd64 --dry-run   # print the command only
 ```
@@ -61,7 +45,7 @@ docker build -f examples/espnet/docker/Dockerfile -t espnet-vllm:v0.28.0 .
 Both paths copy the current working tree into the image. Clone and check out a
 specific commit before building when the exact source revision matters.
 
-## Runtime and validation
+## Runtime compatibility
 
 The image preserves the pinned official CUDA/PyTorch binaries and installs
 `espnet==202609.post1+vllm.0.28.0`, a serving package prepared from a
@@ -73,12 +57,8 @@ NCCL override handled by the dependency check.
 Every image must pass dependency validation, imports for all three models and
 their codec/SSL dependencies, and CLI startup. GitHub repeats those checks
 offline before publication. CPU checks establish neither GPU kernel execution
-nor audio quality; see [VALIDATION.md](VALIDATION.md) for actual H100 and GB200
-inference results.
-
-Docker Hub publication is not established until a credentialed run pushes and
-verifies the public tags. The workflow's successful build-only runs can be
-inspected before the owner supplies those credentials.
+nor audio quality. H100 and GB200 functional coverage is documented in
+[VALIDATION.md](VALIDATION.md).
 
 ## Run
 
@@ -101,24 +81,24 @@ docker run --rm --gpus all \
     --enable-prefix-caching
 ```
 
-Notes:
+### Runtime options and model caches
 
 - `--no-async-scheduling` matches the default of the `serve_*.sh` scripts
   (`ASYNC_SCHEDULING=0`). Async scheduling is on by default in v0.28.0;
-  this flag selects the configuration the audio path was brought up on.
+  this flag selects synchronous scheduling for the audio models.
 - `VLLM_USE_V2_MODEL_RUNNER=0` is baked into the image with `ENV`, because
   the audio hooks only exist in the V1 model runner and a plain `docker run`
   bypasses the serve scripts that would otherwise set it. Do not override it
   for these three models: the V2 runner boots and emits text but returns no
   audio at all.
 
-- The HF cache mount matters: bagpiper lazy-loads the Xcodec decoder from
+- The Hugging Face cache stores auxiliary model weights. Bagpiper loads Xcodec from
   `hf-audio/xcodec-hubert-general` on the first audio decode, and OpusLM
   audio *input* pulls the XEUS checkpoint + kmeans model from `espnet/xeus`
   (2.2 GB). Without a warm cache the container needs network access to the
   HF hub for those.
-- OpusLM's DAC decoder is the exception, and it is already baked into the
-  image. It is fetched through `espnet_model_zoo`, which keeps its own
+- OpusLM's DAC decoder is included in the image. It is fetched through
+  `espnet_model_zoo`, which keeps its own
   cache inside `site-packages/espnet_model_zoo` rather than the HF hub
   cache, so the `~/.cache/huggingface` mount above would not cover it. The
   build pre-warms it (308 MB), so audio output works with no egress.

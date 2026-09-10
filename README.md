@@ -1,110 +1,76 @@
-# vLLM + ESPnet audio language models
+# vLLM + ESPnet
 
-A fork of [vLLM](https://github.com/vllm-project/vllm) that adds serving support
-for three ESPnet speech models: **bagpiper**, **opuslm**, and
-**opuslm_dialogue**, with engine and serving extensions for multi-stream audio
-generation and classifier-free guidance (CFG).
+A [vLLM](https://github.com/vllm-project/vllm) integration for ESPnet audio
+language models, supporting speech synthesis, speech recognition, and spoken
+dialogue through an OpenAI-compatible API. This fork extends the inference
+engine with multi-stream audio generation and classifier-free guidance (CFG).
 
 This repository accompanies [An Efficient vLLM-Based Inference Pipeline for
 Unified Audio Understanding and Generation](https://arxiv.org/abs/2607.02119),
-accepted at **Interspeech 2026**. See [Citation](#citation).
+accepted at **Interspeech 2026**.
 
-> This is a modified fork, not an official vLLM release. Upstream's own README is
-> preserved verbatim at [README.vllm.md](README.vllm.md).
+## Supported models
 
-## Versions
-
-| Component | Version |
-| --- | --- |
-| Upstream base | vLLM **v0.28.0**, tag commit `2cf0a6915ce544dc493a0990f2ea38d81601128a` (2026-08-23) |
-| Default branch | `main` |
-| Docker base image | `vllm/vllm-openai:v0.28.0` |
-
-The three model implementations are Python-only, so compiled kernels come
-straight from the upstream v0.28.0 wheel.
-
-For the exact commit of a checkout, run `git rev-parse HEAD`; for a packaged
-snapshot, read the manifest that ships beside the archive. This file
-deliberately records no commit count — any number written here would be stale
-the moment the commit writing it landed.
-
-## The models
-
-| name | backbone | what it does | official weights |
+| Model | Backbone | Tasks | Checkpoint |
 | --- | --- | --- | --- |
-| `bagpiper` | Qwen3-8B + Qwen3-Omni audio tower + Xcodec | audio generation from a described scene; 8 codec streams, optional CFG | [`espnet/bagpiper-tts-sft`](https://huggingface.co/espnet/bagpiper-tts-sft) |
-| `opuslm` | OLMo-2-7B | TTS, ASR, text LM | [`espnet/OpusLM_7B_Anneal`](https://huggingface.co/espnet/OpusLM_7B_Anneal) |
-| `opuslm_dialogue` | SmolLM2-1.7B | spoken dialogue | [`espnet/multi_turn_SDS_RLAIF`](https://huggingface.co/espnet/multi_turn_SDS_RLAIF) |
+| `bagpiper` | Qwen3-8B + Qwen3-Omni audio tower | Scene-conditioned speech generation with optional CFG; text and audio understanding | [`espnet/bagpiper-tts-sft`](https://huggingface.co/espnet/bagpiper-tts-sft) |
+| `opuslm` | OLMo-2-7B | Text-to-speech, speech recognition, text continuation | [`espnet/OpusLM_7B_Anneal`](https://huggingface.co/espnet/OpusLM_7B_Anneal) |
+| `opuslm_dialogue` | SmolLM2-1.7B | Spoken and text dialogue | [`espnet/multi_turn_SDS_RLAIF`](https://huggingface.co/espnet/multi_turn_SDS_RLAIF) |
 
-Use those exact names for `--served-model-name`, and make sure `config.json`
-declares the matching `model_type`.
+Use the model names above for `--served-model-name` and the matching
+`model_type` in `config.json`. Official ESPnet checkpoints require conversion
+before serving; the converters generate the configuration, tokenizer assets,
+and safetensors files. See [Model checkpoints and conversion](examples/espnet/MODELS.md)
+for source revisions and conversion details.
 
-**None of the published checkpoints is directly vLLM-loadable** — they ship raw
-ESPnet weights with no `config.json`, tokenizer or safetensors, so a conversion
-step is required. The converter builds those missing files itself, from public
-sources pinned by revision and hash, so nothing else is needed.
-[`examples/espnet/MODELS.md`](examples/espnet/MODELS.md) records which repo and
-revision each model comes from, how that was proven, and where every generated
-file comes from.
+## Installation
+
+This integration is based on **vLLM 0.28.0** and uses its precompiled CUDA
+extensions. The Docker image packages the fork with the ESPnet serving
+dependencies for **Linux amd64 and arm64**.
+
+Build from the repository root, selecting the host architecture:
+
+```bash
+examples/espnet/docker/build.sh --arch amd64 --tag espnet-vllm:v0.28.0
+# On ARM64:
+examples/espnet/docker/build.sh --arch arm64 --tag espnet-vllm:v0.28.0
+```
+
+See the [Docker guide](examples/espnet/docker/README.md) for GPU requirements,
+container launch commands, and model-cache configuration. The image includes
+the runtime and codecs; download and convert the language-model checkpoints
+separately.
 
 ## Quickstart
 
-Copy-paste runnable on a clean machine once vLLM 0.28.0 and this fork's Python
-tree are installed. One GPU, no other inputs.
+Run the following commands from the repository root in an environment with
+this fork and its ESPnet dependencies installed. In the Docker image, the
+repository is located at `/workspace/vllm-fork`.
+
+### Bagpiper
 
 ```bash
-# 1. fetch the official weights (17 GB of native ESPnet checkpoint)
+# Download and verify the checkpoint.
 hf download espnet/bagpiper-tts-sft --local-dir ~/models/bagpiper-tts-sft
 (cd ~/models/bagpiper-tts-sft && sha256sum -c SHA256SUMS)
 
-# 2. convert. config.json and the tokenizer are built from pinned public
-#    sources -- Qwen3-8B-Base for the text side, Qwen3-Omni for the audio
-#    tower, both named by Bagpiper's own released training YAML -- then
-#    validated before any weight is written.
+# Convert the checkpoint and generate the required configuration and tokenizer.
 python examples/espnet/convert/convert_bagpiper_ckpt.py \
     ~/models/bagpiper-tts-sft ~/models/bagpiper-tts-sft-vllm
-# add --dry-run first to check weight coverage without writing 17 GB
 
-# 3. serve (port 9811; extra args pass through to `vllm serve`)
+# Start the server on port 9811.
 MODEL_PATH=~/models/bagpiper-tts-sft-vllm bash examples/espnet/serve_bagpiper.sh
+```
 
-# 4. request
+Send a request from a second terminal:
+
+```bash
 python examples/espnet/clients/client_bagpiper.py --task tts --out demo.wav
 ```
 
-The other two models are the same shape, with `--model` naming which one the
-checkpoint is:
-
-```bash
-hf download espnet/OpusLM_7B_Anneal --local-dir ~/models/opuslm
-python examples/espnet/convert/convert_opuslm_ckpt.py \
-    ~/models/opuslm ~/models/opuslm-vllm --model opuslm
-MODEL_PATH=~/models/opuslm-vllm bash examples/espnet/serve_opuslm.sh
-
-hf download espnet/multi_turn_SDS_RLAIF --local-dir ~/models/sds
-python examples/espnet/convert/convert_opuslm_ckpt.py \
-    ~/models/sds ~/models/opuslm-dialogue-vllm --model opuslm_dialogue
-MODEL_PATH=~/models/opuslm-dialogue-vllm bash examples/espnet/serve_opuslm_dialogue.sh
-```
-
-Two things the converter refuses to do quietly. It validates every tensor
-against the weight groups the model can load and exits non-zero listing
-anything unexpected, so a layout change fails loudly instead of producing a
-directory that loads with missing weights. And every fetched source file is
-checked against a recorded sha256, so an upstream edit to a tokenizer stops the
-conversion instead of silently changing your model.
-
-On a machine with no network access, pre-download what
-`python examples/espnet/convert/bootstrap_assets.py --model bagpiper --print-sources`
-lists (about 11 MB) and pass `--assets-from <dir>`. To build just the
-config/tokenizer, or to diff them against a directory you already trust, run
-that script directly.
-
-## Bagpiper takes a scene description, not a sentence to read
-
-This is the one thing that trips people up. Bagpiper is **not** a text-to-speech
-engine. Describe the audio you want, and quote any spoken line inside that
-description:
+Bagpiper generates audio from a scene description. To specify spoken content,
+include the line in quotation marks within the description:
 
 ```bash
 python examples/espnet/clients/client_bagpiper.py --task tts --out demo.wav \
@@ -112,120 +78,85 @@ python examples/espnet/clients/client_bagpiper.py --task tts --out demo.wav \
 'Your package will arrive on Tuesday.' No background noise."
 ```
 
-Writing `"Read this aloud: <sentence>"` is out of distribution. It still returns
-audio, but not a faithful reading of your sentence — that mistake produced a
-batch of unintelligible samples before it was caught. The client's default
-`--system` is the 364-character audio-generation system prompt the model was
-trained with; keep it.
+The client supplies the audio-generation system prompt by default. Use
+`--task tts_cfg --cfg 3.0` to enable CFG. Speech generation uses
+`espnet/bagpiper-tts-sft`; audio output from `espnet/bagpiper-sft` is currently
+unsupported by this integration.
 
-### Listen
-
-Real output from `espnet/bagpiper-tts-sft` converted with the script above, on
-one H100. Exact prompts, measurements and an ASR cross-check are in
-[`examples/espnet/demo_assets/README.md`](examples/espnet/demo_assets/README.md).
-
-| clip | what it says | length |
-| --- | --- | --- |
-| [`bagpiper_tts_hello_greeting.wav`](examples/espnet/demo_assets/bagpiper_tts_hello_greeting.wav) | "Hello, how are you today?" | 1.40 s |
-| [`bagpiper_tts_train_announcement.wav`](examples/espnet/demo_assets/bagpiper_tts_train_announcement.wav) | "The next train to Boston departs from platform nine." | 2.78 s |
-| [`bagpiper_tts_weather_report.wav`](examples/espnet/demo_assets/bagpiper_tts_weather_report.wav) | "Tomorrow will be cloudy with a high of eighteen degrees…" | 4.16 s |
-| [`bagpiper_tts_numbers_and_date.wav`](examples/espnet/demo_assets/bagpiper_tts_numbers_and_date.wav) | "Your order total is one thousand two hundred thirty-four dollars…" | 8.14 s |
-| [`bagpiper_tts_hello_greeting_cfg3.wav`](examples/espnet/demo_assets/bagpiper_tts_hello_greeting_cfg3.wav) | same as the first, with `--cfg 3.0` | 1.24 s |
-
-GitHub does not play `.wav` inline; click a link to download, or clone and play
-locally. Whisper transcribed the first two clips word-for-word (0.0% error).
-
-## Docker
-
-[`examples/espnet/docker/`](examples/espnet/docker/README.md) holds one
-Dockerfile covering **x86_64/amd64 and ARM64/aarch64**, deriving from
-`vllm/vllm-openai:v0.28.0` — verified against the Docker Hub registry API to be
-a real multi-arch manifest list, with both per-arch digests pinned in
-`build.sh`.
+### OpusLM
 
 ```bash
-examples/espnet/docker/build.sh --arch amd64     # or arm64, or both
-examples/espnet/docker/build.sh --arch arm64 --dry-run   # print the command only
+hf download espnet/OpusLM_7B_Anneal --local-dir ~/models/opuslm
+python examples/espnet/convert/convert_opuslm_ckpt.py \
+    ~/models/opuslm ~/models/opuslm-vllm --model opuslm
+MODEL_PATH=~/models/opuslm-vllm bash examples/espnet/serve_opuslm.sh
 ```
 
-The repository records static checks of the base image, dependencies and build
-scripts. A locally built image has been reported by the maintainer; its tag,
-source revision and runtime results still need to be recorded here.
-See [Docker Hub automation](examples/espnet/docker/PUBLISHING.md) for the
-build, validation and publication workflow and its setup requirements.
+### OpusLM-dialogue
 
-## What has actually been tested
+```bash
+hf download espnet/multi_turn_SDS_RLAIF --local-dir ~/models/sds
+python examples/espnet/convert/convert_opuslm_ckpt.py \
+    ~/models/sds ~/models/opuslm-dialogue-vllm --model opuslm_dialogue
+MODEL_PATH=~/models/opuslm-dialogue-vllm bash examples/espnet/serve_opuslm_dialogue.sh
+```
 
-On H100 80GB (Linux, CUDA 13 driver, Python 3.12), tensor parallel size 1:
+The converters verify source-asset checksums and checkpoint tensor coverage.
+Use `--dry-run` to inspect conversion without writing weights. For offline
+conversion, use `bootstrap_assets.py --model <name> --print-sources` to list
+required assets, download them in advance, and pass `--assets-from <dir>`.
+Additional request examples are in the [client documentation](examples/espnet/clients/README.md).
 
-- **bagpiper conversion** — `espnet/bagpiper-tts-sft` and `espnet/bagpiper-sft`
-  both converted from their official `model.pt`. Verified by reading the written
-  safetensors back: 1381 of 1381 tensors bit-identical to the source, zero dtype
-  or shape drift, `vocab_weight` dropped, shard index consistent.
-- **conversion with no reference directory** — `espnet/bagpiper-tts-sft`
-  converted again from `model.pt` alone, with `config.json` and the tokenizer
-  fetched and built from the pinned public sources. 1381 of 1381 tensors
-  bit-identical to the source, and all four safetensors shards sha256-identical
-  to the earlier conversion. The generated assets were diffed against the
-  known-good directory file by file (see MODELS.md) and the loaded tokenizers
-  agree on every id tested. Run on transformers 5.16.1 / huggingface_hub
-  1.29.0, i.e. not the version the assets were originally written with.
-- **serving and audio from that directory** — served on this fork and returned
-  audio for both requests sent, `finish_reason=stop`: 1.26 s for the client's
-  default scene prompt and 2.58 s for a fresh hand-written one. Whisper
-  transcribed the first word-for-word; on the second it dropped a leading "The"
-  and wrote "6" for "six". Nobody listened to these two clips.
-- **bagpiper serving and audio** — the converted `bagpiper-tts-sft` served on this
-  fork produced audio for 6 of 6 hand-written scene prompts, all
-  `finish_reason=stop`. Whisper transcribed two of them word-for-word; the rest
-  differ only in numeral spelling. Clips and numbers in `demo_assets/`.
-- **`espnet/bagpiper-sft` audio does not work here** — 0 of 6 requests returned
-  audio through the same server. See
-  [`examples/espnet/MODELS.md`](examples/espnet/MODELS.md); use `bagpiper-tts-sft`
-  for speech.
-- **opuslm_dialogue conversion** — converted from the official `2epoch.pth`
-  with no reference directory: 220 tensors in 2 shards, and the generated
-  `config.json` came out **identical** to the known-good one, key for key.
-- **opuslm**, **opuslm_dialogue** — provenance proven by hash and tensor
-  comparison (see MODELS.md). Their generated assets were diffed against the
-  known-good directories, but neither model was **served** for this change; the
-  earlier TTS/ASR/dialogue runs are recorded in the Chinese guide.
-- Docker — recorded checks cover static configuration; validation of the
-  maintainer's locally built image is pending.
-- Not covered: multi-GPU (TP>1), throughput or latency benchmarking, and formal
-  audio-quality scoring. Nobody listened to the demo clips as part of producing
-  them; the checks are measurements plus the Whisper cross-check.
+## Serving configuration
 
-## More
+The launch scripts select the V1 model runner
+(`VLLM_USE_V2_MODEL_RUNNER=0`) and synchronous scheduling
+(`--no-async-scheduling`). These audio models require the V1 runner. Audio is
+returned as a complete WAV in non-streaming responses. Text-dialogue requests
+return text without audio.
 
-- [`examples/espnet/GETTING_STARTED.zh.md`](examples/espnet/GETTING_STARTED.zh.md)
-  — the full guide (Chinese): what the models are, conversion details, runnable
-  examples with measured output, Docker on a personal machine, verification
-  status, and known limitations.
-- [`examples/espnet/MODELS.md`](examples/espnet/MODELS.md) — which official repo
-  and revision each model comes from, proven by hash and tensor comparison, plus
-  what conversion each needs and the one known gap.
-- [`examples/espnet/demo_assets/README.md`](examples/espnet/demo_assets/README.md)
-  — the demo clips: exact prompts, measurements, ASR cross-check.
-- [`examples/espnet/README.md`](examples/espnet/README.md) — tooling layout.
-- [`README.vllm.md`](README.vllm.md) — upstream vLLM's README, verbatim.
+Container compatibility and GPU smoke-test coverage are documented in
+[Runtime compatibility](examples/espnet/docker/COMPATIBILITY.md) and
+[Container verification](examples/espnet/docker/VALIDATION.md). Performance
+and audio-quality benchmarks are outside the scope of those functional checks.
 
-Licensed under Apache-2.0, the same as upstream vLLM. See [LICENSE](LICENSE).
+## Audio examples
+
+| Example | Duration |
+| --- | --- |
+| [Greeting](examples/espnet/demo_assets/bagpiper_tts_hello_greeting.wav) | 1.40 s |
+| [Greeting with CFG](examples/espnet/demo_assets/bagpiper_tts_hello_greeting_cfg3.wav) | 1.24 s |
+| [Train announcement](examples/espnet/demo_assets/bagpiper_tts_train_announcement.wav) | 2.78 s |
+| [Weather report](examples/espnet/demo_assets/bagpiper_tts_weather_report.wav) | 4.16 s |
+| [Order total and date](examples/espnet/demo_assets/bagpiper_tts_numbers_and_date.wav) | 8.14 s |
+
+Generated with `espnet/bagpiper-tts-sft` on an H100 GPU. Download the WAV files
+to listen; prompts and generation settings are in the
+[audio examples documentation](examples/espnet/demo_assets/README.md).
+
+## Documentation
+
+- [Getting started (中文)](examples/espnet/GETTING_STARTED.zh.md)
+- [Model checkpoints and conversion](examples/espnet/MODELS.md)
+- [Reference clients](examples/espnet/clients/README.md)
+- [Docker build and deployment](examples/espnet/docker/README.md)
+- [Docker Hub publishing](examples/espnet/docker/PUBLISHING.md)
+- [Upstream vLLM documentation](README.vllm.md)
 
 ## Citation
 
-If you use this inference pipeline, please cite our Interspeech 2026 paper:
+If you use this work, please cite:
 
 ```bibtex
-@inproceedings{wang2026efficient,
-  title={An Efficient {vLLM}-Based Inference Pipeline for Unified Audio Understanding and Generation},
+@article{wang2026efficient,
+  title={An Efficient vLLM-Based Inference Pipeline for Unified Audio Understanding and Generation},
   author={Wang, Haoran and Tian, Jinchuan and Arora, Siddhant and Watanabe, Shinji},
-  booktitle={Interspeech 2026},
-  year={2026},
-  note={Accepted for publication},
-  eprint={2607.02119},
-  archivePrefix={arXiv},
-  primaryClass={eess.AS},
-  url={https://arxiv.org/abs/2607.02119}
+  journal={arXiv preprint arXiv:2607.02119},
+  year={2026}
 }
 ```
+
+## License
+
+[Apache License 2.0](LICENSE). This repository is maintained as an ESPnet fork
+of vLLM; the upstream README is preserved in [README.vllm.md](README.vllm.md).

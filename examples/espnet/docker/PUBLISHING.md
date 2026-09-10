@@ -6,10 +6,10 @@ the complete images before pushing them to **docker.io/espnet/vllm**. Only
 after both architecture jobs succeed does it update the shared `latest` tag.
 GitHub holds the source and runs the builds; Docker Hub holds the images.
 
-For the two tasks requiring organization access, forward
-[OWNER_SETUP.md](OWNER_SETUP.md). The workflow follows ESPnet's existing
-`DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` convention. No self-hosted runner,
-Docker Hub Automated Builds subscription or GitHub app is needed.
+Configure the Docker Hub repository and GitHub repository secrets as described
+in [OWNER_SETUP.md](OWNER_SETUP.md). The workflow uses the same
+`DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` names as ESPnet's Docker workflow.
+Organization-level secrets are optional. Builds use GitHub-hosted runners.
 
 ## Automatic updates
 

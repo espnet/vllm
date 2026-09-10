@@ -1,10 +1,9 @@
-# Where the models come from, and what each needs
+# Model checkpoints and conversion
 
-Audited against the live Hugging Face trees on 2026-09-03. Everything below is
-either proven by a hash/tensor comparison or labelled as inference. Nothing here
-is a guess.
+Checkpoint sources, formats, and generated assets for the models supported by
+this integration. Source metadata was verified on 2026-09-03.
 
-## Short answer
+## Checkpoints
 
 | this fork's name | official source | published format | needs conversion? |
 | --- | --- | --- | --- |
@@ -19,8 +18,7 @@ and no vLLM compatibility is claimed."*
 
 ## bagpiper
 
-Two SFT checkpoints exist and they behave differently. This matters more than it
-looks:
+The Bagpiper releases have different inference requirements:
 
 - **`espnet/bagpiper-tts-sft`** — the natural-language-guided speech synthesis
   model, `pipeline_tag: text-to-speech`. Use this one for speech. Verified: 6 of
@@ -55,7 +53,7 @@ repo `JinchuanTian/bagpiper_sft` (dataset), revision
 (151,936 ids) and 8 Xcodec streams. That fixes the whole layout, and it closes
 exactly:
 
-```
+```text
 256 reserved specials
 + 151,936 text ids      -> text range [256, 152192)
 + 8 x 1025 codec tokens -> codec range [152192, 160392)
@@ -68,7 +66,7 @@ pre-existing directory is needed — see "Building the missing files" below.
 
 ## opuslm
 
-**Proven.** The `model.pth` we converted has sha256
+The OpusLM `model.pth` has SHA256
 `a8e1a0166265fee20ea830d11c996d90da7060723eda6c89bf1ffd25a4378e61`, byte-identical
 to `espnet/OpusLM_7B_Anneal/model.pth` (14,886,005,245 bytes, same LFS oid).
 
@@ -80,13 +78,13 @@ dialogue model.
 
 ## opuslm_dialogue
 
-**Proven: [`espnet/multi_turn_SDS_RLAIF`](https://huggingface.co/espnet/multi_turn_SDS_RLAIF)**,
+Source: [`espnet/multi_turn_SDS_RLAIF`](https://huggingface.co/espnet/multi_turn_SDS_RLAIF),
 revision `a784cde04ffb1e7e8e83044dab24b54d1c298429`, file `2epoch.pth`
 (7,469,766,446 bytes, LFS oid
 `f602b54b5680b57cb5dceceb2d7184630f086d7d85b58e7cfbbf882f509bc332`).
 
-How it was proven, not guessed: the released `2epoch.pth` was downloaded, the
-converter's key mapping applied, and every tensor compared against the
+Verification applied the converter's key mapping to the released
+`2epoch.pth` and compared every tensor against the
 `opuslm_dialogue` safetensors this fork was developed against. Result — 221
 source tensors, one `criterion.*` dropped, **220 of 220 matching bit-for-bit,
 max |Δ| = 0.0**, identical shapes and dtypes (F32 on both sides), zero keys on
@@ -97,21 +95,7 @@ list 62,670 (our `vocab_size`), `model: dpo`, and
 `output_dir: exp/speechlm_audio_dialogue_fisher_train_delay_..._dpo_dialogue_combined_full`
 — a multi-turn spoken-dialogue model trained with DPO/RLAIF.
 
-Attribution, stated carefully: this is consistent with the model having been
-published by Siddhant Arora — HF user [`Siddhant`](https://huggingface.co/Siddhant)
-(full name "Arora") is an `espnet` org member and multi-turn SDS with RLAIF is his
-research area. The *repository identity above is proven*; who uploaded the file is
-**not** something the HF API exposes per-file, so treat the person as
-well-supported inference rather than proof.
-
-Two dead ends worth recording so nobody repeats them: `espnet/OpusLM_1.7B_Anneal`
-shares the SmolLM2-1.7B geometry and the exact 62,670 vocabulary, which makes it
-look like a candidate — it is not; its weights are bf16/3.77 GB and provably a
-different checkpoint. `espnet/speechlm_unified_v1_1.7B` is also a different
-checkpoint (3,768,476,459 bytes). Architecture and vocabulary overlap is not
-provenance.
-
-## Building the missing files
+## Configuration and tokenizer assets
 
 espnet publishes weights only, so a vLLM directory additionally needs a
 `config.json` and a tokenizer. `convert/bootstrap_assets.py` builds both from
@@ -140,7 +124,7 @@ reserved and 8,200 codec tokens, and which codec repo decodes the audio. Run
 `bootstrap_assets.py --model <name> --print-sources` for the full pinned list
 with URLs and hashes.
 
-### Verified against the known-good directories
+### Asset compatibility
 
 Generated assets were diffed against the directories this fork was developed
 and tested with. `merges.txt`, `chat_template.jinja` and
@@ -182,9 +166,9 @@ instead.
 | `bagpiper` | `audio_config.n_window_infer` | 400 | 800 |
 | `opuslm` | `rms_norm_eps` | 1e-05 | 1e-06 |
 
-The OpusLM one is the only genuinely unexplained entry: OLMo-2's own
-`config.json` says `1e-06`, and the hand-written OpusLM config has always said
-`1e-05`. OpusLM was not re-run for this change, so the tested value stands.
+The OpusLM `rms_norm_eps` override preserves the reference configuration.
+Its difference from the backbone default remains unexplained; the converter
+retains `1e-05` for compatibility.
 
 Two derivations worth spelling out, because the obvious source is the wrong one:
 
@@ -193,7 +177,7 @@ Two derivations worth spelling out, because the obvious source is the wrong one:
   `train_dtype` stays `float32`, so the DeepSpeed block is what says the
   precision. It matters for `opuslm_dialogue`: its `2epoch.pth` is *stored* as
   float32, so reading the dtype off the tensors would emit `float32`, double the
-  serving memory and change the numerics of a configuration nobody has run. The
+  serving memory and change the reference inference precision. The
   generator keeps `bfloat16` and prints a note when the stored weights disagree.
 - **OpusLM's five `*_task_token_id` fields are absent from the hand-written
   config.** The generator writes them, looked up by name in `token_list`
