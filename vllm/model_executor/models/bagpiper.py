@@ -11,10 +11,13 @@ Features:
 """
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.nn as nn
+
+if TYPE_CHECKING:
+    import numpy as np
 from transformers import BatchFeature
 from transformers.models.whisper import WhisperFeatureExtractor
 
@@ -142,16 +145,13 @@ class _BagpiperProcessor:
 # Multimodal processing classes
 # ---------------------------------------------------------------------------
 class BagpiperProcessingInfo(BaseProcessingInfo):
-
     def get_hf_config(self):
         return self.ctx.get_hf_config(BagpiperConfig)
 
     def get_hf_processor(self, **kwargs: object) -> _BagpiperProcessor:
         return _BagpiperProcessor()
 
-    def get_feature_extractor(
-        self, **kwargs: object
-    ) -> WhisperFeatureExtractor:
+    def get_feature_extractor(self, **kwargs: object) -> WhisperFeatureExtractor:
         return self.get_hf_processor(**kwargs).feature_extractor
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -164,10 +164,7 @@ class BagpiperProcessingInfo(BaseProcessingInfo):
         )
 
 
-class BagpiperDummyInputsBuilder(
-    BaseDummyInputsBuilder[BagpiperProcessingInfo]
-):
-
+class BagpiperDummyInputsBuilder(BaseDummyInputsBuilder[BagpiperProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_audios = mm_counts.get("audio", 0)
         processor = self.info.get_hf_processor()
@@ -182,8 +179,7 @@ class BagpiperDummyInputsBuilder(
         num_audios = mm_counts.get("audio", 0)
         feature_extractor = self.info.get_feature_extractor()
         target_audio_length = (
-            min(feature_extractor.chunk_length, 30)
-            * feature_extractor.sampling_rate
+            min(feature_extractor.chunk_length, 30) * feature_extractor.sampling_rate
         )
         audio_overrides = mm_options.get("audio") if mm_options else None
         return {
@@ -196,9 +192,7 @@ class BagpiperDummyInputsBuilder(
 
 
 def _bagpiper_field_config(hf_inputs: Mapping[str, torch.Tensor]):
-    audio_feature_lengths = hf_inputs.get(
-        "audio_feature_lengths", torch.empty((0,))
-    )
+    audio_feature_lengths = hf_inputs.get("audio_feature_lengths", torch.empty((0,)))
     return dict(
         input_audio_features=MultiModalFieldConfig.flat_from_sizes(
             "audio", audio_feature_lengths, dim=1
@@ -209,7 +203,6 @@ def _bagpiper_field_config(hf_inputs: Mapping[str, torch.Tensor]):
 
 
 class BagpiperMultiModalDataParser(MultiModalDataParser):
-
     def _parse_audio_data(
         self,
         data: dict[str, torch.Tensor] | ModalityData[AudioItem],
@@ -290,9 +283,7 @@ class BagpiperMultiModalProcessor(
                 # No mask: just flatten batch into time dimension
                 # (batch, mel, frames) -> (mel, batch*frames)
                 b, m, f = input_features.shape
-                input_features = input_features.permute(
-                    1, 0, 2
-                ).reshape(m, b * f)
+                input_features = input_features.permute(1, 0, 2).reshape(m, b * f)
 
             audio_inputs["input_audio_features"] = input_features
             audio_inputs["feature_attention_mask"] = attention_mask
@@ -350,8 +341,7 @@ class BagpiperMultiModalProcessor(
                 audios = mm_items.get_items("audio", AudioProcessorItems)
                 audio = audios.get(item_idx)
                 raise ValueError(
-                    f"The audio {audio} is too short to be represented "
-                    "inside the model"
+                    f"The audio {audio} is too short to be represented inside the model"
                 )
             # ESPnet keeps <|audio|> marker as embed(8) BEFORE audio
             # features: <|user|> embed(<|audio|>) [N features] <|eos|>
@@ -359,9 +349,7 @@ class BagpiperMultiModalProcessor(
             # Positions 1..N = audio features (multimodal, replaced)
             tokens = [audio_token_id] * (num_features + 1)
 
-            def _is_embed(
-                _tokenizer: object, _full: object
-            ) -> torch.Tensor:
+            def _is_embed(_tokenizer: object, _full: object) -> torch.Tensor:
                 mask = torch.ones(num_features + 1, dtype=torch.bool)
                 mask[0] = False  # keep <|audio|> marker as-is
                 return mask
@@ -406,15 +394,13 @@ class BagpiperForConditionalGeneration(
             "model.embed_tokens.": "language_model.model.embed_tokens.",
             "lm_head.": "language_model.lm_head.",
             # Audio encoder
-            "multimodal_io_dict.continuous_audio.model.audio_tower.":
-                "audio_tower.",
+            "multimodal_io_dict.continuous_audio.model.audio_tower.": "audio_tower.",
             # Audio adaptor
             "adaptor.continuous_audio.": "audio_adaptor.",
             # Stream embedding (no prefix change)
             "stream_emb.": "stream_emb.",
             # Xcodec decoder
-            "multimodal_io_dict.discrete_audio.codec_model.":
-                "codec_decoder.",
+            "multimodal_io_dict.discrete_audio.codec_model.": "codec_decoder.",
         }
     )
 
@@ -474,6 +460,8 @@ class BagpiperForConditionalGeneration(
         self._per_req_config: dict[str, dict] = {}
         # Stream 1-7 token history per request (keyed by req_id)
         self._stream17_history: dict[str, list[torch.Tensor]] = {}
+        self._stream_tokens_by_position: dict[str, dict[int, torch.Tensor]] = {}
+        self._audio_batch_layout: dict[str, tuple[int, int, int]] = {}
         # Stream 0 codec token history per request (for server-side decode)
         self._stream0_history: dict[str, list[int]] = {}
         # Current batch request IDs (set by model runner before forward)
@@ -507,7 +495,7 @@ class BagpiperForConditionalGeneration(
 
         # Text mask (stream 0): allow text range [256, 152192) + eos + eot
         text_mask_s0 = torch.ones(V, dtype=torch.bool)
-        text_mask_s0[config.text_token_offset:config.text_token_end] = False
+        text_mask_s0[config.text_token_offset : config.text_token_end] = False
         text_mask_s0[config.eos_token_id] = False
         text_mask_s0[config.eot_token_id] = False
         self.register_buffer("text_mask_s0", text_mask_s0)
@@ -576,17 +564,15 @@ class BagpiperForConditionalGeneration(
             feature_attention_mask=feature_attention_mask,
         )
 
-    def _parse_and_validate_multimodal_inputs(
-        self, **kwargs: object
-    ) -> dict:
+    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         mm_input_by_modality = {}
         for input_key in kwargs:
             if (
                 input_key == "input_audio_features"
                 and "audio" not in mm_input_by_modality
             ):
-                mm_input_by_modality["audio"] = (
-                    self._parse_and_validate_audio_input(**kwargs)
+                mm_input_by_modality["audio"] = self._parse_and_validate_audio_input(
+                    **kwargs
                 )
         return mm_input_by_modality
 
@@ -614,9 +600,7 @@ class BagpiperForConditionalGeneration(
     # Multimodal embedding interface
     # ------------------------------------------------------------------
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
-        mm_input_by_modality = self._parse_and_validate_multimodal_inputs(
-            **kwargs
-        )
+        mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
             return []
 
@@ -624,9 +608,7 @@ class BagpiperForConditionalGeneration(
         for modality in mm_input_by_modality:
             multimodal_input = mm_input_by_modality[modality]
             if modality == "audio" and multimodal_input is not None:
-                audio_embeddings = self._process_audio_input(
-                    multimodal_input
-                )
+                audio_embeddings = self._process_audio_input(multimodal_input)
                 multimodal_embeddings += tuple(audio_embeddings)
         return multimodal_embeddings
 
@@ -655,6 +637,9 @@ class BagpiperForConditionalGeneration(
         check_rids: list[str] = []
         check_phases: list[str] = []
         for i, req_id in enumerate(batch_rids):
+            layout = self._audio_batch_layout.get(req_id)
+            if layout is not None and layout[0] + layout[1] < layout[2]:
+                continue  # Replaying an earlier chunk cannot advance the phase.
             rc = self._per_req_config.get(req_id)
             if rc is None or rc.get("mode") != "text_audio":
                 continue
@@ -668,35 +653,28 @@ class BagpiperForConditionalGeneration(
         if check_indices:
             tokens = input_ids[check_indices].tolist()
             for k, token in enumerate(tokens):
-                if (check_phases[k] == "text"
-                        and token == cfg.eot_token_id):
-                    self._per_req_config[check_rids[k]]["phase"] = \
-                        "transition"
-                elif (check_phases[k] == "transition"
-                      and token == _ASSISTANT_TOKEN_ID):
-                    self._per_req_config[check_rids[k]]["phase"] = \
-                        "audio"
-                elif (check_phases[k] == "audio"
-                      and token == cfg.eot_token_id):
+                if check_phases[k] == "text" and token == cfg.eot_token_id:
+                    self._per_req_config[check_rids[k]]["phase"] = "transition"
+                elif check_phases[k] == "transition" and token == _ASSISTANT_TOKEN_ID:
+                    self._per_req_config[check_rids[k]]["phase"] = "audio"
+                elif check_phases[k] == "audio" and token == cfg.eot_token_id:
                     # EOT during audio → force EOS on next step so
                     # vLLM's stop mechanism finishes the request.
-                    self._per_req_config[check_rids[k]]["phase"] = \
-                        "audio_stop"
+                    self._per_req_config[check_rids[k]]["phase"] = "audio_stop"
 
         # Pass 2: sync shadow phase from paired main via cfg_group_id
         main_phase_by_group: dict[str, str] = {}
         for req_id in batch_rids:
             rc = self._per_req_config.get(req_id)
-            if rc and rc.get('cfg_group_id') and not rc.get('is_shadow'):
-                main_phase_by_group[rc['cfg_group_id']] = rc.get(
-                    'phase', 'text')
+            if rc and rc.get("cfg_group_id") and not rc.get("is_shadow"):
+                main_phase_by_group[rc["cfg_group_id"]] = rc.get("phase", "text")
 
         for req_id in batch_rids:
             rc = self._per_req_config.get(req_id)
-            if rc and rc.get('is_shadow'):
-                gid = rc.get('cfg_group_id')
+            if rc and rc.get("is_shadow"):
+                gid = rc.get("cfg_group_id")
                 if gid and gid in main_phase_by_group:
-                    rc['phase'] = main_phase_by_group[gid]
+                    rc["phase"] = main_phase_by_group[gid]
 
     def embed_input_ids(
         self,
@@ -707,9 +685,8 @@ class BagpiperForConditionalGeneration(
     ) -> torch.Tensor:
         """Embed input tokens with multi-stream support for audio decode.
 
-        During prefill: standard text embedding + multimodal merge.
-        During decode (audio mode): embed stream 0 token + buffer streams
-        1-7, sum across streams.
+        Merge prompt audio, then add the saved streams 1-7 for generated
+        positions during both decode and re-prefill.
         """
         # Phase tracking for text_audio mode
         self._update_text_audio_phase(input_ids)
@@ -722,9 +699,7 @@ class BagpiperForConditionalGeneration(
         )
 
         # Merge multimodal (audio) embeddings during prefill
-        if multimodal_embeddings is not None and len(
-            multimodal_embeddings
-        ) > 0:
+        if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
             inputs_embeds = _merge_multimodal_embeddings(
                 inputs_embeds=inputs_embeds,
                 multimodal_embeddings=multimodal_embeddings,
@@ -747,30 +722,35 @@ class BagpiperForConditionalGeneration(
         inputs_embeds: torch.Tensor,
         is_audio: torch.Tensor,
     ) -> torch.Tensor:
-        """Add stream 1-7 embeddings for audio-mode tokens during decode.
+        """Add stream 1-7 embeddings during decode and preemption recovery.
 
         For audio-mode positions, the embedding becomes:
             sum(embed_tokens(stream_k_token) for k in 0..7)
         where stream 0 is the current input_ids token and streams 1-7
-        come from the per-request buffer dict.
+        come from the history indexed by request and absolute position.
         """
         audio_indices = is_audio.nonzero(as_tuple=True)[0]
         if len(audio_indices) == 0:
             return inputs_embeds
 
         embed_fn = self.language_model.model.embed_tokens
-        batch_rids = self._current_batch_req_ids
-
-        # Collect buffer vectors for each audio position by request ID
+        # Use the streams sampled for each absolute token position. The latest
+        # decode buffer alone cannot reconstruct a preempted request's KV cache.
         buf_rows = []
         valid_positions = []
-        for pos in audio_indices.tolist():
-            if pos < len(batch_rids):
-                req_id = batch_rids[pos]
-                buf_vec = self._stream_buffer_dict.get(req_id)
-                if buf_vec is not None:
-                    buf_rows.append(buf_vec)
-                    valid_positions.append(pos)
+        audio_positions = set(audio_indices.tolist())
+        offset = 0
+        for req_id in self._current_batch_req_ids:
+            start, count, _ = self._audio_batch_layout[req_id]
+            history = self._stream_tokens_by_position.get(req_id, {})
+            for local_pos in range(count):
+                pos = offset + local_pos
+                if pos in audio_positions:
+                    streams = history.get(start + local_pos)
+                    if streams is not None:
+                        buf_rows.append(streams)
+                        valid_positions.append(pos)
+            offset += count
 
         if not buf_rows:
             return inputs_embeds
@@ -785,10 +765,9 @@ class BagpiperForConditionalGeneration(
         # Sum stream 1-7 embeddings and add to inputs_embeds
         stream_sum = stream_embeds.sum(dim=1)  # [num_valid, hidden]
         valid_idx = torch.tensor(
-            valid_positions, device=inputs_embeds.device, dtype=torch.long)
-        inputs_embeds[valid_idx] = (
-            inputs_embeds[valid_idx] + stream_sum
+            valid_positions, device=inputs_embeds.device, dtype=torch.long
         )
+        inputs_embeds[valid_idx] = inputs_embeds[valid_idx] + stream_sum
 
         return inputs_embeds
 
@@ -849,7 +828,9 @@ class BagpiperForConditionalGeneration(
         # Pairing uses cfg_group_id (not request IDs, since vLLM assigns
         # its own IDs internally).  Within each group, the request with
         # is_shadow=True is the unconditional branch.
-        cfg_pairs: dict[int, tuple[int, float]] = {}  # main_idx -> (shadow_idx, cfg_val)
+        cfg_pairs: dict[
+            int, tuple[int, float]
+        ] = {}  # main_idx -> (shadow_idx, cfg_val)
         shadow_indices: set[int] = set()
         batch_rids = self._current_batch_req_ids
 
@@ -861,27 +842,26 @@ class BagpiperForConditionalGeneration(
                 if i >= stream0_logits.shape[0]:
                     break
                 rc = self._per_req_config.get(req_id, {})
-                gid = rc.get('cfg_group_id')
+                gid = rc.get("cfg_group_id")
                 if not gid:
                     continue
-                if rc.get('is_shadow'):
+                if rc.get("is_shadow"):
                     shadow_indices.add(i)
-                    cfg_group_members.setdefault(gid, {})['shadow'] = i
+                    cfg_group_members.setdefault(gid, {})["shadow"] = i
                 else:
-                    cfg_group_members.setdefault(gid, {})['main'] = i
+                    cfg_group_members.setdefault(gid, {})["main"] = i
 
             # Build cfg_pairs for groups where both main and shadow are
             # present AND main is in audio phase with cfg > 1
             for gid, members in cfg_group_members.items():
-                main_i = members.get('main')
-                shadow_i = members.get('shadow')
+                main_i = members.get("main")
+                shadow_i = members.get("shadow")
                 if main_i is None or shadow_i is None:
                     continue
                 main_rid = batch_rids[main_i]
                 rc = self._per_req_config.get(main_rid, {})
-                if (rc.get('phase') == 'audio'
-                        and rc.get('cfg', 1) > 1):
-                    cfg_pairs[main_i] = (shadow_i, float(rc['cfg']))
+                if rc.get("phase") == "audio" and rc.get("cfg", 1) > 1:
+                    cfg_pairs[main_i] = (shadow_i, float(rc["cfg"]))
 
         # Save raw logits for CFG pairs (before masking/temp) — batched
         cfg_pair_main_indices: list[int] = []
@@ -892,10 +872,10 @@ class BagpiperForConditionalGeneration(
             cfg_pair_shadow_indices.append(shadow_idx)
             cfg_pair_vals.append(cfg_val)
         if cfg_pair_main_indices:
-            cfg_raw_main_batch = stream0_logits[
-                cfg_pair_main_indices].clone()   # [K, V]
+            cfg_raw_main_batch = stream0_logits[cfg_pair_main_indices].clone()  # [K, V]
             cfg_raw_shadow_batch = stream0_logits[
-                cfg_pair_shadow_indices].clone()  # [K, V]
+                cfg_pair_shadow_indices
+            ].clone()  # [K, V]
         else:
             cfg_raw_main_batch = None
             cfg_raw_shadow_batch = None
@@ -904,10 +884,7 @@ class BagpiperForConditionalGeneration(
         # 2. Determine mode per position from argmax of raw logits
         tentative = stream0_logits.argmax(dim=-1)  # [N]
 
-        is_detect = (
-            (tentative == cfg.text_token_id)
-            | (tentative == cfg.audio_token_id)
-        )
+        is_detect = (tentative == cfg.text_token_id) | (tentative == cfg.audio_token_id)
         is_audio = (
             (tentative >= cfg.codec_base_offset)
             & (tentative < cfg.vocab_size)
@@ -945,14 +922,12 @@ class BagpiperForConditionalGeneration(
                     else:  # audio
                         allow_both_pos.append(pos)
             if force_text_pos:
-                idx = torch.tensor(
-                    force_text_pos, device=stream0_logits.device)
+                idx = torch.tensor(force_text_pos, device=stream0_logits.device)
                 stream0_logits[idx] = stream0_logits[idx].masked_fill(
                     self.text_only_modality_mask.unsqueeze(0), float("-inf")
                 )
             if allow_both_pos:
-                idx = torch.tensor(
-                    allow_both_pos, device=stream0_logits.device)
+                idx = torch.tensor(allow_both_pos, device=stream0_logits.device)
                 stream0_logits[idx] = stream0_logits[idx].masked_fill(
                     self.modality_mask.unsqueeze(0), float("-inf")
                 )
@@ -972,7 +947,9 @@ class BagpiperForConditionalGeneration(
         # 4. For audio-mode requests: sample streams 1-7 and buffer
         if is_audio.any():
             self._sample_and_buffer_streams(
-                hidden_states, is_audio, hidden_states.device,
+                hidden_states,
+                is_audio,
+                hidden_states.device,
                 cfg_pairs=cfg_pairs,
                 shadow_indices=shadow_indices,
             )
@@ -992,10 +969,8 @@ class BagpiperForConditionalGeneration(
                 rc = self._get_req_config(pos)
                 mode = rc.get("mode", "text_only")
                 if mode == "text_audio" and rc.get("phase", "text") == "text":
-                    vllm_t = rc.get(
-                        "audio_temperature", cfg_defaults.audio_temperature)
-                    text_t = rc.get(
-                        "text_temperature", cfg_defaults.text_temperature)
+                    vllm_t = rc.get("audio_temperature", cfg_defaults.audio_temperature)
+                    text_t = rc.get("text_temperature", cfg_defaults.text_temperature)
                     if vllm_t > 0 and text_t > 0:
                         scales.append(vllm_t / text_t)
                     else:
@@ -1003,12 +978,11 @@ class BagpiperForConditionalGeneration(
                 else:
                     scales.append(1.0)
             scale_t = torch.tensor(
-                scales, device=stream0_logits.device,
+                scales,
+                device=stream0_logits.device,
                 dtype=stream0_logits.dtype,
             )
-            stream0_logits[text_idx] = (
-                stream0_logits[text_idx] * scale_t.unsqueeze(-1)
-            )
+            stream0_logits[text_idx] = stream0_logits[text_idx] * scale_t.unsqueeze(-1)
 
         # ===== CFG: merge conditioned + unconditioned logits =====
         # Applied on raw logits, then re-mask for audio range.
@@ -1022,8 +996,9 @@ class BagpiperForConditionalGeneration(
         # CFG should only operate on actual codec generation steps.
         if cfg_raw_main_batch is not None:
             # Filter out detect positions — they must not get CFG merge
-            non_detect = [k for k, mi in enumerate(cfg_pair_main_indices)
-                          if not is_detect[mi]]
+            non_detect = [
+                k for k, mi in enumerate(cfg_pair_main_indices) if not is_detect[mi]
+            ]
             if non_detect:
                 nd_main = [cfg_pair_main_indices[k] for k in non_detect]
                 cv = torch.tensor(
@@ -1031,11 +1006,10 @@ class BagpiperForConditionalGeneration(
                     device=stream0_logits.device,
                     dtype=stream0_logits.dtype,
                 ).unsqueeze(-1)  # [K', 1]
-                combined = (cfg_raw_main_batch[non_detect] * cv
-                            + cfg_raw_shadow_batch[non_detect]
-                            * (1.0 - cv))
-                combined.masked_fill_(
-                    self._audio_masks[0].unsqueeze(0), float("-inf"))
+                combined = cfg_raw_main_batch[non_detect] * cv + cfg_raw_shadow_batch[
+                    non_detect
+                ] * (1.0 - cv)
+                combined.masked_fill_(self._audio_masks[0].unsqueeze(0), float("-inf"))
                 stream0_logits[nd_main] = combined
         # ===== CFG merge end =====
 
@@ -1100,13 +1074,15 @@ class BagpiperForConditionalGeneration(
         audio_idx = is_audio.nonzero(as_tuple=True)[0]
 
         # Filter out shadow positions — they don't get their own sampling
-        main_audio_positions = [p for p in audio_idx.tolist()
-                                if p not in shadow_indices]
+        main_audio_positions = [
+            p
+            for p in audio_idx.tolist()
+            if p not in shadow_indices and self._can_sample_audio(p)
+        ]
         if not main_audio_positions:
             return
 
-        main_audio_idx = torch.tensor(
-            main_audio_positions, device=device)
+        main_audio_idx = torch.tensor(main_audio_positions, device=device)
         main_audio_hidden = hidden_states[main_audio_idx]  # [N_main, H]
         num_main = len(main_audio_positions)
 
@@ -1120,22 +1096,22 @@ class BagpiperForConditionalGeneration(
                 shadow_idx, cfg_val = cfg_pairs[pos]
                 cfg_local_indices.append(j)
         if cfg_local_indices:
-            shadow_hs = [hidden_states[cfg_pairs[main_audio_positions[j]][0]]
-                         for j in cfg_local_indices]
+            shadow_hs = [
+                hidden_states[cfg_pairs[main_audio_positions[j]][0]]
+                for j in cfg_local_indices
+            ]
             shadow_hidden_stack = torch.stack(shadow_hs)  # [K, H]
             cfg_vals_tensor = torch.tensor(
-                [cfg_pairs[main_audio_positions[j]][1]
-                 for j in cfg_local_indices],
+                [cfg_pairs[main_audio_positions[j]][1] for j in cfg_local_indices],
                 device=device,
                 dtype=hidden_states.dtype,
             ).unsqueeze(-1)  # [K, 1]
 
         # Sample all 7 streams for main audio positions
-        new_buffer = torch.zeros(num_main, model_cfg.num_stream - 1,
-                                 dtype=torch.long, device=device)
-        sampling_groups = self._get_audio_sampling_groups(
-            main_audio_positions, device
+        new_buffer = torch.zeros(
+            num_main, model_cfg.num_stream - 1, dtype=torch.long, device=device
         )
+        sampling_groups = self._get_audio_sampling_groups(main_audio_positions, device)
 
         for s in range(1, model_cfg.num_stream):
             # Add stream embedding offset
@@ -1150,9 +1126,9 @@ class BagpiperForConditionalGeneration(
                 s_logits = all_logits[:num_main]
                 s_logits_shadow = all_logits[num_main:]
                 # Vectorized CFG merge
-                s_logits[cfg_local_indices] = (
-                    s_logits[cfg_local_indices] * cfg_vals_tensor
-                    + s_logits_shadow * (1.0 - cfg_vals_tensor))
+                s_logits[cfg_local_indices] = s_logits[
+                    cfg_local_indices
+                ] * cfg_vals_tensor + s_logits_shadow * (1.0 - cfg_vals_tensor)
             else:
                 s_logits = logits_processor(lm_head, h_s)
 
@@ -1178,9 +1154,8 @@ class BagpiperForConditionalGeneration(
                 req_id = batch_rids[pos]
                 buf_vec = new_buffer[j]
                 self._stream_buffer_dict[req_id] = buf_vec.clone()
-                self._stream17_history.setdefault(req_id, []).append(
-                    buf_vec.clone()
-                )
+                self._cache_stream_tokens(req_id)
+                self._stream17_history.setdefault(req_id, []).append(buf_vec.clone())
 
         # Copy main's stream 1-7 buffer to paired shadow so that
         # shadow's embedding in the next step includes all 8 streams,
@@ -1190,8 +1165,23 @@ class BagpiperForConditionalGeneration(
                 shadow_batch_idx, _ = cfg_pairs[pos]
                 if shadow_batch_idx < len(batch_rids):
                     shadow_rid = batch_rids[shadow_batch_idx]
-                    self._stream_buffer_dict[shadow_rid] = (
-                        new_buffer[j].clone())
+                    self._stream_buffer_dict[shadow_rid] = new_buffer[j].clone()
+                    self._cache_stream_tokens(shadow_rid)
+
+    def _can_sample_audio(self, batch_index: int) -> bool:
+        if batch_index >= len(self._current_batch_req_ids):
+            return True  # Profiling without live requests.
+        req_id = self._current_batch_req_ids[batch_index]
+        layout = self._audio_batch_layout.get(req_id)
+        return layout is None or layout[0] + layout[1] >= layout[2]
+
+    def _cache_stream_tokens(self, req_id: str) -> None:
+        layout = self._audio_batch_layout.get(req_id)
+        if layout is not None:
+            next_position = layout[0] + layout[1]
+            self._stream_tokens_by_position.setdefault(req_id, {})[next_position] = (
+                self._stream_buffer_dict[req_id]
+            )
 
     def _get_audio_sampling_groups(
         self,
@@ -1305,6 +1295,7 @@ class BagpiperForConditionalGeneration(
         self._stream17_history.pop(req_id, None)
         self._stream0_history.pop(req_id, None)
         self._stream_buffer_dict.pop(req_id, None)
+        self._stream_tokens_by_position.pop(req_id, None)
 
     def encode_audio_to_base64_wav(
         self, req_id: str, stream0_tokens: list[int]
@@ -1318,19 +1309,17 @@ class BagpiperForConditionalGeneration(
         Returns:
             Base64-encoded WAV string, or None on failure
         """
-        import base64
         import io
         import wave
 
         import numpy as np
+        import pybase64 as base64
 
         if not stream0_tokens:
             return None
 
         try:
-            audio_np, sr = self.decode_audio_from_tokens(
-                req_id, stream0_tokens
-            )
+            audio_np, sr = self.decode_audio_from_tokens(req_id, stream0_tokens)
             if len(audio_np) == 0:
                 return None
 
@@ -1345,9 +1334,7 @@ class BagpiperForConditionalGeneration(
                 wf.writeframes(audio_int16.tobytes())
             return base64.b64encode(buf.getvalue()).decode("ascii")
         except Exception:
-            logger.exception(
-                "Failed to decode audio for request %s", req_id
-            )
+            logger.exception("Failed to decode audio for request %s", req_id)
             return None
 
     # ------------------------------------------------------------------
@@ -1357,6 +1344,7 @@ class BagpiperForConditionalGeneration(
         """Lazy-load the Xcodec model on first use."""
         if self._xcodec_model is None:
             from transformers import XcodecModel
+
             self._xcodec_model = XcodecModel.from_pretrained(
                 self._xcodec_model_tag
             ).eval()
@@ -1366,9 +1354,7 @@ class BagpiperForConditionalGeneration(
             logger.info("Loaded Xcodec model from %s", self._xcodec_model_tag)
         return self._xcodec_model
 
-    def _global_to_codebook(
-        self, full_matrix: torch.Tensor
-    ) -> torch.Tensor:
+    def _global_to_codebook(self, full_matrix: torch.Tensor) -> torch.Tensor:
         """Convert global token IDs to codebook indices [0, 1023].
 
         Args:
@@ -1384,9 +1370,7 @@ class BagpiperForConditionalGeneration(
             result[..., s] = (result[..., s] - offset).clamp(0, 1023)
         return result
 
-    def _delay_deinterleave(
-        self, codes: torch.Tensor
-    ) -> torch.Tensor:
+    def _delay_deinterleave(self, codes: torch.Tensor) -> torch.Tensor:
         """Remove delay interleaving from multi-stream tokens.
 
         Args:
@@ -1402,13 +1386,11 @@ class BagpiperForConditionalGeneration(
 
         new_codes = []
         for n in range(N):
-            new_codes.append(codes[:, n:n + T_original, n])
+            new_codes.append(codes[:, n : n + T_original, n])
         return torch.stack(new_codes, dim=-1)
 
     @torch.inference_mode()
-    def _xcodec_decode(
-        self, codebook_indices: torch.Tensor
-    ) -> "np.ndarray":
+    def _xcodec_decode(self, codebook_indices: torch.Tensor) -> "np.ndarray":
         """Decode codebook indices to audio waveform.
 
         Args:
@@ -1417,8 +1399,6 @@ class BagpiperForConditionalGeneration(
         Returns:
             numpy array of audio samples
         """
-        import numpy as np
-
         xcodec = self._get_xcodec_model()
         # Xcodec expects [B, num_codebooks, T]
         codes = codebook_indices.permute(0, 2, 1).to(xcodec.device)
@@ -1489,18 +1469,14 @@ class BagpiperForConditionalGeneration(
     # ------------------------------------------------------------------
     # Weight loading
     # ------------------------------------------------------------------
-    def load_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
             # Skip Xcodec decoder weights for now (loaded separately if
             # needed for audio output decoding)
             skip_prefixes=["codec_decoder."],
         )
-        return loader.load_weights(
-            weights, mapper=self.hf_to_vllm_mapper
-        )
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     # ------------------------------------------------------------------
     # Multi-model key mapping (for pipeline parallelism)

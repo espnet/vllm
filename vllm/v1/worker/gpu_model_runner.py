@@ -3675,6 +3675,16 @@ class GPUModelRunner(
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         model._current_batch_req_ids = req_ids
         model._tokens_per_req = [num_scheduled_tokens.get(r, 1) for r in req_ids]
+        # Absolute positions distinguish generated audio from prompt audio and
+        # remain valid after preemption, chunking, and batch reordering.
+        model._audio_batch_layout = {
+            req_id: (
+                int(self.input_batch.num_computed_tokens_cpu[i]),
+                num_scheduled_tokens[req_id],
+                self.requests[req_id].num_tokens,
+            )
+            for i, req_id in enumerate(req_ids)
+        }
 
         is_opuslm = hasattr(model, "_stream18_history")
         for req_id in req_ids:
@@ -3774,9 +3784,9 @@ class GPUModelRunner(
         emb(s0) + (nq-1) * emb(pad) and the recomputed KV would no longer match
         what the model generated. Feeding the stored history back fixes it.
 
-        Known limitation kept from the original fork: only opuslm_dialogue
-        reads ``_prefill_stream_replay``, so a preempted audio-phase request on
-        bagpiper or plain opuslm still degrades.
+        Only opuslm_dialogue reads this marker-based replay. Plain opuslm
+        still lacks it; Bagpiper restores streams by absolute token position
+        in its embedding implementation.
         """
         replay: dict[int, torch.Tensor] = {}
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
