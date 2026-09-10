@@ -97,13 +97,22 @@ jobs:
         env:
           ARCH: ${{ matrix.arch }}
         shell: bash
-        run: examples/espnet/docker/build.sh --arch "$ARCH" --tag "$LOCAL_IMAGE"
+        run: |
+          set -euo pipefail
+          if ! examples/espnet/docker/build.sh --arch "$ARCH" --tag "$LOCAL_IMAGE" 2>&1 | tee /tmp/espnet-build.log; then
+            while IFS= read -r line; do
+              line="${line//'%'/'%25'}"
+              echo "::error title=Docker build failed::$line"
+            done < <(tail -n 35 /tmp/espnet-build.log)
+            exit 1
+          fi
 
       - name: Validate the image offline
         shell: bash
         run: |
           set -euo pipefail
-          docker run --rm --network none --entrypoint python3 "$LOCAL_IMAGE" -m pip check
+          docker run --rm --network none --entrypoint python3 "$LOCAL_IMAGE" \
+            /workspace/vllm-fork/examples/espnet/docker/check_dependencies.py
           docker run --rm --network none --entrypoint python3 "$LOCAL_IMAGE"             /workspace/vllm-fork/examples/espnet/docker/smoke_test.py
           docker run --rm --network none --entrypoint vllm "$LOCAL_IMAGE" serve --help >/dev/null
           docker image inspect "$LOCAL_IMAGE" --format 'Architecture={{.Architecture}} Size={{.Size}}'

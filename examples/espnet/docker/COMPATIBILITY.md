@@ -18,8 +18,12 @@ claim that the full ESPnet training suite supports this combination.
 
 `runtime_constraints.py` preserves the base image's torch, CUDA libraries,
 Triton, NumPy, transformers and tokenizer versions. Installation uses one
-resolver for the ESPnet dependencies and runs `pip check`; there is no forced
-torch replacement or ignored dependency error. The source and these scripts
+`uv` resolver for the ESPnet dependencies, including the official base's
+`/etc/uv-overrides.txt`: upstream intentionally uses NCCL 2.30.7 for DeepEPv2,
+although torch's wheel metadata pins NCCL 2.29.7 (see `docker/Dockerfile`).
+`check_dependencies.py` runs `pip check` and permits exactly that one known
+message with those exact installed versions. Any other error fails, both
+before and after installation. There is no forced torch replacement. The source and these scripts
 remain in `/workspace/vllm-fork/examples/espnet/docker` inside the image.
 
 Publication requires the built image to pass dependency, import and CLI
