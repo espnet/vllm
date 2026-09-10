@@ -10,8 +10,8 @@ The earlier Dockerfile forced torch back to 2.13 after installing ESPnet, which
 left that declared conflict in the environment.
 
 `prepare_espnet.py` starts from the checksum-pinned ESPnet 202609.post1 source
-archive. It pins torch 2.13.0 and torchaudio 2.11.0, updates the setuptools
-constraint to vLLM's range, and adds the local version suffix before building
+archive. It pins torch 2.13.0, torchaudio 2.11.0 and sentencepiece 0.2.2,
+updates the setuptools constraint to vLLM's range, and adds the local version suffix before building
 a new package. No ESPnet model implementation is changed. This is a serving
 integration maintained in this repository, not an upstream ESPnet release or a
 claim that the full ESPnet training suite supports this combination.

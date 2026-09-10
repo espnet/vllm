@@ -25,6 +25,7 @@ def prepare(source: Path) -> None:
         '"setuptools>=38.5.1,<74.0.0"': ('"setuptools>=77.0.3,<81.0.0"', 2),
         '"torch>=2.9.1,<2.12"': ('"torch==2.13.0"', 1),
         '"torchaudio>=2.9.1,<2.12"': ('"torchaudio==2.11.0"', 1),
+        '"sentencepiece==0.2.1"': ('"sentencepiece==0.2.2"', 1),
     }
     for old, (new, expected_count) in replacements.items():
         if text.count(old) != expected_count:
