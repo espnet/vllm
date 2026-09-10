@@ -84,7 +84,7 @@ selected on their torch constraint alone: for example, ESPnet 202511 requires
 Do not bypass the check or assume successful installation proves compatibility.
 
 The subsequent offline smoke check verifies the vLLM import path, package
-versions, a CUDA-enabled torch build, the native extension, all three model
+versions, a CUDA-enabled torch build, the native extension's presence, all three model
 imports, both OpusLM tokenizers, codec/SSL dependencies and CLI startup.
 It does **not** validate audio quality, GPU kernel execution, model loading,
 CFG, preemption or throughput. Run the documented clients against converted

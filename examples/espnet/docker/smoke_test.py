@@ -3,6 +3,7 @@
 """Check the installed container runtime without a GPU or checkpoint download."""
 
 import importlib
+import importlib.util
 import os
 from importlib.metadata import version
 from pathlib import Path
@@ -32,8 +33,18 @@ def main() -> None:
     if os.environ.get("VLLM_USE_V2_MODEL_RUNNER") != "0":
         raise RuntimeError("ESPnet audio generation requires the V1 model runner")
 
+    native_module = "vllm._C_stable_libtorch"
+    native_spec = importlib.util.find_spec(native_module)
+    if native_spec is None or not native_spec.origin:
+        raise RuntimeError(f"Missing native extension: {native_module}")
+    print(f"Native extension present: {native_spec.origin}")
+    # Loading the CUDA extension also needs the host driver (libcuda.so.1),
+    # which a CPU-only Docker builder does not provide.
+    if torch.cuda.is_available():
+        importlib.import_module(native_module)
+        print(f"import {native_module}: OK")
+
     for module in (
-        "vllm._C",
         "torchaudio",
         "torchvision",
         "vllm.model_executor.models.bagpiper",
