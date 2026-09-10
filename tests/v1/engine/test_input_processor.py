@@ -6,26 +6,29 @@ from unittest.mock import patch
 
 import pytest
 
+from vllm.config import SchedulerConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.input_processor import InputProcessor
 
 
 @pytest.mark.parametrize(
-    "max_seqs, token_budget, cfg, error",
+    "max_seqs, cfg, error",
     [
-        (1, 8192, 3.0, "max_num_seqs >= 2"),
-        (2, 1, 3.0, "max_num_batched_tokens >= 2"),
-        (2, 8192, 3.0, None),
-        (1, 1, 1.0, None),
-        (1, 1, None, None),
+        (1, 3.0, "max_num_seqs >= 2"),
+        (2, 3.0, None),
+        (1, 1.0, None),
+        (1, None, None),
     ],
 )
-def test_cfg_rejects_unschedulable_pair(max_seqs, token_budget, cfg, error):
+def test_cfg_rejects_unschedulable_pair(max_seqs, cfg, error):
     """Reject impossible CFG capacity before a request reaches EngineCore."""
     processor = InputProcessor.__new__(InputProcessor)
-    processor.scheduler_config = SimpleNamespace(
-        max_num_seqs=max_seqs, max_num_batched_tokens=token_budget
+    processor.scheduler_config = SchedulerConfig(
+        max_num_seqs=max_seqs,
+        max_num_batched_tokens=32,
+        max_model_len=32,
+        is_encoder_decoder=False,
     )
     processor.model_config = SimpleNamespace(return_sampling_mask=False)
     processor.speculative_config = None

@@ -102,17 +102,14 @@ class InputProcessor:
                 raise VLLMValidationError("This model does not support generation")
 
             cfg_scale = (params.extra_args or {}).get("cfg")
-            if cfg_scale is not None and cfg_scale > 1:
-                if self.scheduler_config.max_num_seqs < 2:
-                    raise VLLMValidationError(
-                        "CFG requires max_num_seqs >= 2 for the main and "
-                        "shadow requests."
-                    )
-                if self.scheduler_config.max_num_batched_tokens < 2:
-                    raise VLLMValidationError(
-                        "CFG requires max_num_batched_tokens >= 2 for the "
-                        "main and shadow requests."
-                    )
+            if (
+                cfg_scale is not None
+                and cfg_scale > 1
+                and self.scheduler_config.max_num_seqs < 2
+            ):
+                raise VLLMValidationError(
+                    "CFG requires max_num_seqs >= 2 for the main and shadow requests."
+                )
 
             params.verify(
                 self.model_config,
