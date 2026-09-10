@@ -16,13 +16,18 @@ a new package. No ESPnet model implementation is changed. This is a serving
 integration maintained in this repository, not an upstream ESPnet release or a
 claim that the full ESPnet training suite supports this combination.
 
-`runtime_constraints.py` preserves the base image's torch, CUDA libraries,
-Triton, NumPy, transformers and tokenizer versions. Installation uses one
+`runtime_constraints.py` preserves all installed base runtime versions, including
+torch, CUDA libraries, Triton, NumPy, transformers, tokenizers and telemetry.
+Build tools are resolved separately. Installation uses one
 `uv` resolver for the ESPnet dependencies, including the official base's
 `/etc/uv-overrides.txt`: upstream intentionally uses NCCL 2.30.7 for DeepEPv2,
 although torch's wheel metadata pins NCCL 2.29.7 (see `docker/Dockerfile`).
 `check_dependencies.py` runs `pip check` and permits exactly that one known
-message with those exact installed versions. Any other error fails, both
+message with those exact installed versions. On ARM, NVIDIA’s cuSPARSELt
+0.8.1 aarch64 wheel has the internal tag `manylinux2014_sbsa`, which pip does
+not recognize. The check permits that one platform message only after verifying
+the package version, internal tag, and actual shared library’s 64-bit little-endian
+AArch64 ELF header. It does not rewrite wheel metadata. Any other error fails
 before and after installation. There is no forced torch replacement. The source and these scripts
 remain in `/workspace/vllm-fork/examples/espnet/docker` inside the image.
 

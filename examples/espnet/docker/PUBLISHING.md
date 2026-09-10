@@ -71,8 +71,9 @@ not created merely by committing this workflow or adding secrets.
 The Dockerfile installs the explicitly versioned ESPnet serving package
 explained in [COMPATIBILITY.md](COMPATIBILITY.md), retaining the official
 vLLM CUDA/PyTorch stack. `check_dependencies.py` runs `pip check`, allowing
-only the exact NCCL metadata discrepancy intentionally present in the pinned
-upstream image. Any other dependency error fails the build.
+only the verified NCCL override and ARM cuSPARSELt wheel-tag discrepancy
+present in the pinned upstream image, as documented in COMPATIBILITY.md.
+Any other dependency error fails the build.
 
 The image must also import all three models, both OpusLM tokenizers, ESPnet
 codec/SSL components, torchaudio, torchvision and Xcodec, and start the vLLM
