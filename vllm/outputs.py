@@ -191,6 +191,8 @@ class RequestOutput:
                         )
                         completion.finish_reason = next_completion.finish_reason
                         completion.stop_reason = next_completion.stop_reason
+                        if next_completion.audio_output is not None:
+                            completion.audio_output = next_completion.audio_output
                     else:
                         # Replace the output with the new one
                         self.outputs[i] = next_completion

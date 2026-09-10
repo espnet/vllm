@@ -1238,6 +1238,7 @@ async def test_request_output_collector():
                         cumulative_logprob=(idx + 1 * 1.0),
                         logprobs=[{"a": idx, "b": idx}],
                         finish_reason="length" if (idx == NUM_REQS - 1) else None,
+                        audio_output="final-wav" if idx == NUM_REQS - 1 else None,
                     )
                 ],
                 finished=(idx == NUM_REQS - 1),
@@ -1289,6 +1290,7 @@ async def test_request_output_collector():
 
     assert output.finished
     assert output.outputs[0].finish_reason == "length"
+    assert output.outputs[0].audio_output == "final-wav"
     # Text, token_ids, and logprobs should get merged.
     assert output.outputs[0].text == TEXT * num_to_put
     for tok_0, tok_1 in zip(output.outputs[0].token_ids, list(range(num_to_put))):
