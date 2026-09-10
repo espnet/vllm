@@ -246,7 +246,7 @@ python examples/espnet/convert/convert_opuslm_ckpt.py \
 条目，会被当成普通文本编码成好几个模型没见过的 token。脚本把它换成只取
 内容的模板：
 
-```
+```text
 {% for message in messages %}{{ message['content'] }}{% endfor %}
 ```
 
@@ -431,7 +431,7 @@ python client_opuslm.py --task asr --audio test.wav
 实测：810 个 prompt token、45 个 completion token，`audio: (none)`。输入是
 一段 15.95 秒的英语朗读，转写出来的是：
 
-```
+```text
 He heard first words I spoke in the original phonograph a little piece of
 practical poetry. Mary had a little lamb, it reared quite a spell, and
 everywhere that Mary went, the lamb was sure to go.
@@ -592,7 +592,44 @@ docker run --gpus all --rm -p 9811:9811 \
 
 ---
 
+### 发布到 Docker Hub 的 espnet 组织
+
+目标镜像仓库是 `espnet/vllm`。GitHub Actions 的
+[`espnet-docker.yml`](../../.github/workflows/espnet-docker.yml) 负责取出 `main`
+的代码、构建镜像、检查依赖和导入，再把通过检查的同一个镜像推送到 Docker Hub。
+配置完成后，相关代码更新和每周定时任务都会触发它，也可以手动运行。
+不需要额外开通 Docker Hub 的 Automated Builds。
+
+首次配置需要在 Docker Hub 选择 `espnet` namespace，创建名为 `vllm` 的公开仓库；
+在 GitHub 的 `espnet/vllm` 仓库创建 `docker` environment，放入
+`DOCKERHUB_USERNAME` 和 `DOCKERHUB_TOKEN` secrets；再注册一台原生 x86_64
+Docker 构建机器，并设置 `ESPNET_DOCKER_RUNNER`。构建机器的 Docker 数据目录
+需要至少 100 GiB 空闲空间。GitHub 和 Docker Hub 的组织权限彼此独立，
+`espnet/espnet` 仓库中的 environment secrets 也不会自动共享过来。
+
+先手动运行 `publish=false` 验证构建和运行环境，首次成功发布之后，再把
+`ESPNET_DOCKER_ENABLED` 与 `ESPNET_DOCKER_PUBLISH` 两个仓库变量设为 `true`。
+此后可用 `docker pull espnet/vllm:latest` 获取最新通过检查的镜像，或使用带
+commit/run ID 的 tag 固定版本。当前自动发布只覆盖 amd64；ARM 可以放在同一个
+仓库，但需要补齐原生 ARM 构建和验证后再发布包含两种架构的 manifest。
+
+**目前尚未完成 Docker Hub 首次发布。** Dockerfile 的 ESPnet 与 vLLM 依赖约束
+存在冲突，仍需选择并验证兼容的运行环境；workflow 的依赖检查会阻止发布不一致的
+镜像。完整操作命令、token 类型与依赖说明见
+[`docker/PUBLISHING.md`](docker/PUBLISHING.md)。
+
 ## 五、验证到了哪一步
+
+2026-09-10 补测了 Bagpiper 的抢占恢复：服务端现在按请求和绝对 token 位置
+保留生成音频的其余七条流，在重新计算 KV cache 时恢复对应 embedding；
+分块恢复尚未到生成边界时，不采样新音频流或推进生成阶段。
+同一 H100、同一问候语和 seed 下，正常生成与修复前的 token、codec token、
+WAV 完全一致，音频长 1.22 秒。第 40 个音频帧后强制抢占，完整恢复生成
+1.22 秒音频，每块 128 token 的恢复生成 1.38 秒音频，均能返回最终 WAV。
+抢占结果尚不与无抢占逐 token/逐样本一致；这些结果不是全面音质评测。
+混合批次、单 token 分块和 CFG 主/影子请求的位置隔离由单元测试覆盖，
+尚未用 GPU 验证全部并发/CFG 组合。该修复只覆盖 Bagpiper，
+不代表 OpusLM 或 OpusLM-dialogue 的抢占恢复已经验证。
 
 平台：8×H100 80GB HBM3，Linux，overlay 文件系统。
 
@@ -659,7 +696,7 @@ transformers 4，`vllm/transformers_utils/config.py` 会直接抛
 除了这五个文件，还跑了一轮更宽的回归，覆盖 `tests/v1/core`、
 `tests/tokenizers_`、`tests/model_executor`、`tests/transformers_utils`：
 
-```
+```text
 1 failed, 1142 passed, 223 skipped, 16 warnings, 94 errors in 1476.73s (0:24:36)
 ```
 
@@ -702,7 +739,7 @@ md5 `903599715f6bea955adc1cfbf83aa9e2`),来源是
 `bagpiper_sft/sft_part2/filtered_realistic.jsonl` 的 `system` 那一轮,4000 条
 采样里一字不差地一致:
 
-```
+```text
 You are a helpful assistant that generates audio based on user requests. You can
 create various types of audio including sound effects, music, speech, ambient
 sounds, and any combination of these. When given a request, first think through

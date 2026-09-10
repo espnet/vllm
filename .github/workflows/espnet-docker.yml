@@ -42,7 +42,7 @@ jobs:
     env:
       LOCAL_IMAGE: espnet-vllm:ci-${{ github.run_id }}-${{ github.run_attempt }}
       PUBLISH: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish) || (github.event_name != 'workflow_dispatch' && vars.ESPNET_DOCKER_PUBLISH == 'true') }}
-      DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
+      DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'espnet/vllm' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -7,6 +7,19 @@ GitHub environment and `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` secrets.
 The workflow is prepared for setup; no automated image publication has been
 verified from this repository.
 
+The intended public image repository is **`docker.io/espnet/vllm`**. The
+workflow defaults to this name; `DOCKERHUB_IMAGE` is an optional override.
+GitHub stores and builds the source; Docker Hub stores the resulting images.
+This uses GitHub Actions, so Docker Hub's separate **Automated Builds** service
+and a Docker Hub connection to GitHub are not required.
+
+```text
+espnet/vllm main update / weekly timer / manual run
+  -> GitHub Actions -> native Docker builder -> dependency and import checks
+  -> docker.io/espnet/vllm:sha-<commit>-<run>-<attempt>-amd64
+  -> promote to main-amd64 and latest if main has not advanced
+```
+
 ## Triggers and image tags
 
 - Changes on `main` affecting the image or Python runtime trigger a build once
@@ -35,16 +48,29 @@ validate the complete runtime on a native arm64 GPU machine.
 
 ## One-time setup
 
-1. Create the intended Docker Hub repository, for example `espnet/vllm`, and
-   obtain a token authorized to push there. The image namespace is independent
-   of the GitHub repository name; membership in the ESPnet GitHub organization
-   alone does not grant Docker Hub access.
+1. In [Docker Hub](https://hub.docker.com/), open **My Hub > Repositories >
+   Create repository**. Select namespace **espnet**, name **vllm**, and
+   visibility **Public**. Creating it requires owner or editor access in the
+   Docker Hub organization. The image namespace is independent of the GitHub
+   repository name; membership in the ESPnet GitHub organization alone does
+   not grant Docker Hub access.
+   Obtain a personal access token with Read/Write permission from a Docker ID
+   that can push to this repository. Set `DOCKERHUB_USERNAME` to that Docker
+   ID, **not** to `espnet` merely because it is the image namespace.
+   Alternatively, if the organization has Docker Team/Business, an owner can
+   create an organization access token with image push access to this
+   repository; for that token type, the login username is `espnet`.
 2. Create the GitHub environment `docker`. Add environment secrets
    `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`. Store the token only in GitHub's
    secret settings. If this environment requires review, its review rules also
    apply to scheduled publication.
-3. Set repository variable `DOCKERHUB_IMAGE` to that repository
-   name without a registry hostname or tag, for example `espnet/vllm`.
+   An environment named `docker` in `espnet/espnet` is separate from the one in
+   `espnet/vllm`. Its secrets are not automatically inherited. An organization
+   secret can instead be shared with this repository by the organization
+   administrator, provided its Docker Hub identity has the required access.
+3. Keep the default image repository `espnet/vllm`, or set repository variable
+   `DOCKERHUB_IMAGE` to another authorized `namespace/repository` without a
+   registry hostname or tag.
 4. Set **repository** variable `ESPNET_DOCKER_RUNNER` to a JSON array of runner
    labels, for example `["self-hosted", "linux", "x64", "espnet-vllm-builder"]`.
    Use a dedicated native amd64 Docker builder with at least **100 GiB free in
@@ -66,6 +92,45 @@ because environment variables are not available when GitHub schedules the job.
 To pause publication while retaining automatic validation, set
 `ESPNET_DOCKER_PUBLISH=false`. No credential or runner has been configured by
 adding these files.
+
+### Exact GitHub setup commands
+
+After creating the Docker Hub repository and registering the native builder,
+the following commands configure `espnet/vllm`. Replace the runner label with
+the label of the machine actually registered in **Settings > Actions >
+Runners**. Merely setting this variable does not provision a machine.
+
+```bash
+gh api --method PUT repos/espnet/vllm/environments/docker
+gh secret set DOCKERHUB_USERNAME --env docker --repo espnet/vllm
+gh secret set DOCKERHUB_TOKEN --env docker --repo espnet/vllm
+gh variable set ESPNET_DOCKER_RUNNER --repo espnet/vllm \
+  --body '["self-hosted","linux","x64","espnet-vllm-builder"]'
+gh workflow run espnet-docker.yml --repo espnet/vllm --ref main \
+  -f publish=false
+```
+
+The secret commands prompt for values; do not put the token into a commit,
+chat message or command argument. Resolve the dependency conflict below and
+validate the built image before running the publication commands:
+
+```bash
+gh workflow run espnet-docker.yml --repo espnet/vllm --ref main \
+  -f publish=true
+# After the first successful push and GPU validation:
+gh variable set ESPNET_DOCKER_PUBLISH --repo espnet/vllm --body true
+gh variable set ESPNET_DOCKER_ENABLED --repo espnet/vllm --body true
+docker buildx imagetools inspect espnet/vllm:latest
+docker pull espnet/vllm:latest
+```
+
+The last two commands work only after an image has actually been published.
+The current automated `latest` tag is amd64, not a promise of ARM support.
+Both architectures can live in this same Docker Hub repository. When native
+ARM build and GPU validation are available, add an ARM build job and promote
+a shared manifest only after both architecture jobs succeed; a pull then
+selects the matching image automatically. Do not have independent architecture
+jobs overwrite the same `latest` tag.
 
 ## Runtime issue to resolve before enabling publication
 
@@ -115,6 +180,9 @@ images still need a reproducible Dockerfile and the workflow above.
 
 ## References
 
+- [Docker Hub: create a repository](https://docs.docker.com/docker-hub/repos/create/)
+- [Docker: personal access tokens](https://docs.docker.com/security/access-tokens/personal-access-tokens/)
+- [Docker: organization access tokens](https://docs.docker.com/security/access-tokens/organization-access-tokens/)
 - [ESPnet's Docker publication workflow](https://github.com/espnet/espnet/blob/master/.github/workflows/publish_docker_image.yml)
   runs weekly on `master` and supports manual dispatch.
 - [Docker: test before push](https://docs.docker.com/build/ci/github-actions/test-before-push/)
