@@ -2,7 +2,7 @@ name: ESPnet Docker image
 
 on:
   push:
-    branches: [main]
+    branches: [main, fix/espnet-docker-ready-20260910]
     paths:
       - '.github/workflows/espnet-docker.yml'
       - 'examples/espnet/**'
@@ -16,130 +16,147 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish after validation (requires configured Docker Hub credentials)
+        description: Publish validated images when Docker Hub credentials are configured
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: read
 
-# One publisher owns the moving tags at a time. Do not interrupt a push.
 concurrency:
-  group: espnet-docker-main
+  group: espnet-docker-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   build:
-    if: >-
-      github.repository == 'espnet/vllm' &&
-      github.ref == 'refs/heads/main' &&
-      (github.event_name == 'workflow_dispatch' ||
-       vars.ESPNET_DOCKER_ENABLED == 'true')
-    # Set this JSON array to a native amd64 builder with sufficient disk space.
-    runs-on: ${{ fromJSON(vars.ESPNET_DOCKER_RUNNER || '["ubuntu-24.04"]') }}
+    if: github.repository == 'espnet/vllm'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            machine: x86_64
+            runner: ubuntu-24.04
+          - arch: arm64
+            machine: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     environment: docker
     timeout-minutes: 180
+    outputs:
+      publish: ${{ steps.publication.outputs.enabled }}
     env:
-      LOCAL_IMAGE: espnet-vllm:ci-${{ github.run_id }}-${{ github.run_attempt }}
-      PUBLISH: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish) || (github.event_name != 'workflow_dispatch' && vars.ESPNET_DOCKER_PUBLISH == 'true') }}
+      LOCAL_IMAGE: espnet-vllm:ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.arch }}
       DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'espnet/vllm' }}
+      # The Docker driver's image store avoids keeping a second full CUDA image
+      # in a separate BuildKit container before loading it into Docker.
+      BUILDX_BUILDER: default
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Check builder and publication configuration
+      - name: Determine whether publication is configured
+        id: publication
         env:
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          REQUESTED: ${{ github.ref == 'refs/heads/main' && (github.event_name != 'workflow_dispatch' || inputs.publish) && vars.ESPNET_DOCKER_PUBLISH != 'false' }}
         shell: bash
         run: |
           set -euo pipefail
-          export DOCKER_CONFIG="$RUNNER_TEMP/espnet-docker-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          mkdir -p "$DOCKER_CONFIG"
-          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
-          test "$(uname -m)" = x86_64 || {
-            echo 'This workflow currently validates and publishes linux/amd64 only.' >&2
-            exit 1
-          }
-          docker info >/dev/null
+          if [[ "$REQUESTED" == true && -n "$USERNAME" && -n "$TOKEN" ]]; then
+            echo 'enabled=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'enabled=false' >> "$GITHUB_OUTPUT"
+            echo 'Build validation only: publication was disabled or Docker Hub credentials are not configured.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Prepare the disposable GitHub-hosted builder
+        env:
+          EXPECTED_MACHINE: ${{ matrix.machine }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(uname -m)" = "$EXPECTED_MACHINE"
+          # These preinstalled SDKs are unused by the container build. This
+          # cleanup is restricted to a fresh GitHub-hosted job VM.
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet             /opt/hostedtoolcache /usr/local/share/powershell
+          docker system prune --all --force
+          docker buildx version
           docker_root=$(docker info --format '{{.DockerRootDir}}')
+          df -h "$docker_root"
           available_kb=$(df -Pk "$docker_root" | awk 'END {print $4}')
-          if (( available_kb < 100 * 1024 * 1024 )); then
-            echo 'Configure ESPNET_DOCKER_RUNNER with at least 100 GiB free Docker storage.' >&2
+          if (( available_kb < 40 * 1024 * 1024 )); then
+            echo 'The image build needs 40 GiB free Docker storage after SDK cleanup.' >&2
             exit 1
           fi
-          if [[ "$PUBLISH" == true ]]; then
-            [[ "$DOCKERHUB_IMAGE" =~ ^[a-z0-9][a-z0-9_-]*/[a-z0-9][a-z0-9._-]*$ ]]
-            test -n "$DOCKERHUB_USERNAME"
-            test -n "$DOCKERHUB_TOKEN"
-          fi
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Build this checkout on the native architecture
+        env:
+          ARCH: ${{ matrix.arch }}
+        shell: bash
+        run: examples/espnet/docker/build.sh --arch "$ARCH" --tag "$LOCAL_IMAGE"
 
-      - name: Build this checkout using the pinned upstream digest
+      - name: Validate the image offline
         shell: bash
         run: |
           set -euo pipefail
-          examples/espnet/docker/build.sh --arch amd64 --tag "$LOCAL_IMAGE"
-
-      - name: Validate the built image without network or model downloads
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker run --rm --network none --entrypoint python3 "$LOCAL_IMAGE" \
-            -m pip check
-          docker run --rm --network none --entrypoint python3 "$LOCAL_IMAGE" \
-            /workspace/vllm-fork/examples/espnet/docker/smoke_test.py
+          docker run --rm --network none --entrypoint python3 "$LOCAL_IMAGE" -m pip check
+          docker run --rm --network none --entrypoint python3 "$LOCAL_IMAGE"             /workspace/vllm-fork/examples/espnet/docker/smoke_test.py
           docker run --rm --network none --entrypoint vllm "$LOCAL_IMAGE" serve --help >/dev/null
+          docker image inspect "$LOCAL_IMAGE" --format 'Architecture={{.Architecture}} Size={{.Size}}'
+          docker system df
 
       - name: Login to Docker Hub
-        if: env.PUBLISH == 'true'
+        if: steps.publication.outputs.enabled == 'true'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Push a unique image and update moving tags
-        if: env.PUBLISH == 'true'
+      - name: Push the validated architecture image
+        if: steps.publication.outputs.enabled == 'true'
+        env:
+          ARCH: ${{ matrix.arch }}
         shell: bash
         run: |
           set -euo pipefail
-          unique_tag="sha-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-amd64"
+          [[ "$DOCKERHUB_IMAGE" =~ ^[a-z0-9][a-z0-9_-]*/[a-z0-9][a-z0-9._-]*$ ]]
+          unique_tag="sha-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${ARCH}"
           docker tag "$LOCAL_IMAGE" "$DOCKERHUB_IMAGE:$unique_tag"
           docker push "$DOCKERHUB_IMAGE:$unique_tag"
+          echo "Published $DOCKERHUB_IMAGE:$unique_tag" >> "$GITHUB_STEP_SUMMARY"
+
+  promote:
+    needs: build
+    if: needs.build.outputs.publish == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment: docker
+    env:
+      DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'espnet/vllm' }}
+    steps:
+      - name: Login to Docker Hub
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Publish the combined manifest after both builds succeed
+        shell: bash
+        run: |
+          set -euo pipefail
+          prefix="$DOCKERHUB_IMAGE:sha-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker buildx imagetools create --tag "$prefix" "$prefix-amd64" "$prefix-arm64"
           current_main=$(git ls-remote https://github.com/espnet/vllm.git refs/heads/main | awk '{print $1}')
           if [[ "$current_main" != "$GITHUB_SHA" ]]; then
-            echo "Published $DOCKERHUB_IMAGE:$unique_tag; main advanced, leaving moving tags unchanged." >> "$GITHUB_STEP_SUMMARY"
+            echo "Published $prefix; main advanced, leaving moving tags unchanged." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          # Promote exactly the validated image; do not rebuild for publication.
-          docker buildx imagetools create --prefer-index=false \
-            --tag "$DOCKERHUB_IMAGE:main-amd64" \
-            --tag "$DOCKERHUB_IMAGE:latest" \
-            "$DOCKERHUB_IMAGE:$unique_tag"
-          {
-            echo "Published: $DOCKERHUB_IMAGE:$unique_tag"
-            echo "Source: $GITHUB_SHA"
-            echo 'Platform: linux/amd64'
-            echo 'Checks: dependency consistency, imports and CLI startup; no GPU model inference.'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Record validation-only result
-        if: env.PUBLISH != 'true'
-        shell: bash
-        run: |
-          echo 'Image built and passed CPU smoke checks. No image was published.' >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Remove only this job's local image and Docker credentials
-        if: always()
-        shell: bash
-        run: |
-          if [[ "$PUBLISH" == true && -n "$DOCKERHUB_IMAGE" ]]; then
-            docker image rm "$DOCKERHUB_IMAGE:sha-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-amd64" || true
-          fi
-          docker image rm "$LOCAL_IMAGE" || true
-          if [[ -n "${DOCKER_CONFIG:-}" ]]; then
-            rm -rf -- "$DOCKER_CONFIG"
-          fi
+          docker buildx imagetools create --tag "$DOCKERHUB_IMAGE:main"             --tag "$DOCKERHUB_IMAGE:latest" "$prefix"
+          for arch in amd64 arm64; do
+            docker buildx imagetools create --prefer-index=false               --tag "$DOCKERHUB_IMAGE:main-$arch" "$prefix-$arch"
+          done
+          docker buildx imagetools inspect "$DOCKERHUB_IMAGE:latest"
+          echo "Published $DOCKERHUB_IMAGE:latest for linux/amd64 and linux/arm64 from $GITHUB_SHA." >> "$GITHUB_STEP_SUMMARY"
