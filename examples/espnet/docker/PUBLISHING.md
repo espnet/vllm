@@ -11,6 +11,12 @@ in [OWNER_SETUP.md](OWNER_SETUP.md). The workflow uses the same
 `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` names as ESPnet's Docker workflow.
 Organization-level secrets are optional. Builds use GitHub-hosted runners.
 
+For a Docker Hub organization access token, set `DOCKERHUB_USERNAME=espnet`
+and grant Image Push on `espnet/vllm` plus Read public repositories. The latter
+allows authenticated pulls of the upstream base image and Dockerfile frontend.
+See [token configuration](OWNER_SETUP.md#token-configuration) for both OAT and
+PAT setup.
+
 ## Automatic updates
 
 Relevant changes on `main`, a weekly Monday 03:23 UTC schedule, or **Run

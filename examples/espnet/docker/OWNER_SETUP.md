@@ -9,15 +9,38 @@ Hub repository and credentials accessible to GitHub Actions.
 Create a public repository named `vllm` under the `espnet` organization if it
 does not already exist, and grant the CI account push access to it.
 
-Alternatively, the first `docker push` can create the repository automatically
-when the token's account has repository-creation permission in the namespace
+With a personal access token, the first `docker push` can also create the
+repository when the account has repository-creation permission in the namespace
 (Owner or Editor for an organization). Automatic creation uses the namespace's
-default visibility; verify that `espnet/vllm` is public after the first push.
+default visibility. Organization access tokens require the separate
+`scope-repository-create` permission to create repositories; it is unnecessary
+when `espnet/vllm` already exists.
 
-Use a retained Read & Write personal access token for that account, or create
-one in Docker Hub under **Account settings → Personal access tokens → Generate
-new token**. The login username is the token owner's Docker ID; the image
-namespace `espnet` may differ from that username.
+## Token configuration
+
+The workflow supports organization access tokens (OATs) and personal access
+tokens (PATs). Configure the username according to the token type:
+
+| Token type | `DOCKERHUB_USERNAME` | `DOCKERHUB_TOKEN` |
+| --- | --- | --- |
+| Organization access token | `espnet` | The organization's token |
+| Personal access token | The token owner's Docker ID | The account's Read & Write token |
+
+For an organization token, select **espnet → Identity & auth → Access tokens**,
+then create or edit the token. Under **Repository**, enable:
+
+- **Read public repositories**, required to pull `vllm/vllm-openai` and the
+  `docker/dockerfile` build frontend.
+- **Image Push** (`scope-image-push`) for **`espnet/vllm`**, which includes
+  pulling images from that repository.
+
+Repository metadata Edit or Admin permissions do not grant image Push access.
+Publishing to an existing repository requires no Delete or organization
+management permissions.
+
+For a personal token, use **Account settings → Personal access tokens → Generate
+new token** and select Read & Write. The account must have push access to
+`espnet/vllm`; its Docker ID may differ from the image namespace `espnet`.
 
 ## GitHub repository secrets
 
@@ -25,10 +48,10 @@ Organization-level secrets are optional. To configure this repository directly:
 
 1. Open [Actions secrets for espnet/vllm](https://github.com/espnet/vllm/settings/secrets/actions).
 2. Select **New repository secret**.
-3. Enter `DOCKERHUB_USERNAME` as the name and the CI account's Docker ID as
-   the value, then select **Add secret**.
+3. Enter `DOCKERHUB_USERNAME` as the name and the username from the table above
+   as the value, then select **Add secret**.
 4. Select **New repository secret** again. Enter `DOCKERHUB_TOKEN` as the
-   name and the account's Read & Write token as the value, then save.
+   name and the configured OAT or PAT as the value, then save.
 
 Enter the token directly into GitHub. Existing secret values cannot be read
 back from GitHub; use a retained token or create a new one if needed.
@@ -53,5 +76,6 @@ publication controls, and verification commands.
 
 - [GitHub Actions secrets](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)
 - [Docker personal access tokens](https://docs.docker.com/security/access-tokens/personal-access-tokens/)
+- [Docker organization access tokens](https://docs.docker.com/security/access-tokens/organization-access-tokens/)
 - [Docker Hub default repository visibility](https://docs.docker.com/docker-hub/settings/)
 - [Docker organization roles](https://docs.docker.com/security/roles-and-permissions/core-roles/)
