@@ -13,7 +13,13 @@ BUILD_PACKAGES = {
     "wheel",
 }
 
-for distribution in sorted(distributions(), key=lambda d: d.metadata["Name"]):
+versions = {}
+for distribution in distributions():
     name = distribution.metadata["Name"].lower().replace("_", "-")
     if name not in BUILD_PACKAGES:
-        print(f"{name}=={distribution.version}")
+        # Debian's system packages may also exist later on sys.path. Preserve
+        # the first (active) distribution, rather than pinning both versions.
+        versions.setdefault(name, distribution.version)
+
+for name, installed in sorted(versions.items()):
+    print(f"{name}=={installed}")

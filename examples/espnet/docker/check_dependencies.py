@@ -45,6 +45,7 @@ def main() -> None:
     errors = set(result.stdout.strip().splitlines())
     if (
         result.returncode != 1
+        or not errors
         or not errors.issubset(allowed)
         or version("torch") != "2.13.0+cu130"
         or version("nvidia-nccl-cu13") != "2.30.7"
