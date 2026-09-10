@@ -115,7 +115,8 @@ jobs:
           docker run --rm --network none --entrypoint python3 "$LOCAL_IMAGE" \
             /workspace/vllm-fork/examples/espnet/docker/check_dependencies.py
           docker run --rm --network none --entrypoint python3 "$LOCAL_IMAGE"             /workspace/vllm-fork/examples/espnet/docker/smoke_test.py
-          docker run --rm --network none --entrypoint vllm "$LOCAL_IMAGE" serve --help >/dev/null
+          docker run --rm --network none -e VLLM_TARGET_DEVICE=cpu \
+            --entrypoint vllm "$LOCAL_IMAGE" serve --help >/dev/null
           docker image inspect "$LOCAL_IMAGE" --format 'Architecture={{.Architecture}} Size={{.Size}}'
           docker system df
 

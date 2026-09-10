@@ -52,5 +52,5 @@ LABEL org.opencontainers.image.source="https://github.com/espnet/vllm" \
 
 # All published images must pass the CPU checks during the build itself.
 RUN python3 /workspace/vllm-fork/examples/espnet/docker/smoke_test.py \
-    && vllm serve --help >/dev/null
+    && VLLM_TARGET_DEVICE=cpu vllm serve --help >/dev/null
 # The upstream ENTRYPOINT remains ["vllm", "serve"].

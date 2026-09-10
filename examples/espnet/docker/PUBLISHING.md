@@ -77,7 +77,9 @@ Any other dependency error fails the build.
 
 The image must also import all three models, both OpusLM tokenizers, ESPnet
 codec/SSL components, torchaudio, torchvision and Xcodec, and start the vLLM
-CLI. GitHub repeats these checks in containers with networking disabled.
+CLI help parser. That help-only command selects the CPU platform because the
+builder has no NVIDIA driver; the image's serving default remains CUDA.
+GitHub repeats these checks in containers with networking disabled.
 These checks do not load LM checkpoints or measure GPU execution, audio
 quality, CFG, preemption or throughput. GPU validation results must be
 recorded separately; see [README.md](README.md).
