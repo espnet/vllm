@@ -73,7 +73,8 @@ NCCL override handled by the dependency check.
 Every image must pass dependency validation, imports for all three models and
 their codec/SSL dependencies, and CLI startup. GitHub repeats those checks
 offline before publication. CPU checks establish neither GPU kernel execution
-nor audio quality; actual GPU validation is recorded separately.
+nor audio quality; see [VALIDATION.md](VALIDATION.md) for actual H100 and GB200
+inference results.
 
 Docker Hub publication is not established until a credentialed run pushes and
 verifies the public tags. The workflow's successful build-only runs can be

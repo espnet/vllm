@@ -489,10 +489,11 @@ VLLM_ESPNET_AUDIO_DEBUG`。这是 vLLM 的环境变量注册表不认识这个�
 
 ## 四、在个人 PC 上 build 和 run Docker
 
-**这个镜像没有在当前集群上构建过，也没有推到任何 registry。** 集群不允许
-build 镜像，也不允许 push。所以下面的命令是按 Dockerfile 的内容写的，只
-做过静态和配置层面的核对，没有实际构建验证。这是本文档里唯一一处未经端到
-端验证的部分。
+2026-09-10，x86_64 和 ARM64 镜像均已在原生 GitHub runner 上完成实际构建，
+并通过镜像内的离线依赖、导入和 CLI 检查。同一份 Docker 配方也已构建成集群
+测试镜像，用于 H100 和 GB200 上的实际推理验证。具体版本、任务和结果见
+[`docker/VALIDATION.md`](docker/VALIDATION.md)。Docker Hub 的首次公开发布
+仍需先完成下面的组织权限和 secret 配置。
 
 镜像从上游官方镜像 `vllm/vllm-openai:v0.28.0` 派生，H100 属于 sm90，上游
 wheel 已经覆盖，所以不需要本地编译 CUDA kernel。

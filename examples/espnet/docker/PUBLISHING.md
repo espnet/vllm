@@ -82,7 +82,7 @@ builder has no NVIDIA driver; the image's serving default remains CUDA.
 GitHub repeats these checks in containers with networking disabled.
 These checks do not load LM checkpoints or measure GPU execution, audio
 quality, CFG, preemption or throughput. GPU validation results must be
-recorded separately; see [README.md](README.md).
+recorded separately; see [VALIDATION.md](VALIDATION.md).
 
 ## Maintainer commands
 

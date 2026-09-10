@@ -11,8 +11,8 @@ left that declared conflict in the environment.
 
 `prepare_espnet.py` starts from the checksum-pinned ESPnet 202609.post1 source
 archive. It pins torch 2.13.0, torchaudio 2.11.0 and sentencepiece 0.2.2,
-updates the setuptools constraint to vLLM's range, and adds the local version suffix before building
-a new package. No ESPnet model implementation is changed. This is a serving
+updates the setuptools constraint to vLLM's range, and adds the local version
+suffix before building a new package. No ESPnet model implementation is changed. This is a serving
 integration maintained in this repository, not an upstream ESPnet release or a
 claim that the full ESPnet training suite supports this combination.
 
@@ -28,10 +28,11 @@ message with those exact installed versions. On ARM, NVIDIA’s cuSPARSELt
 not recognize. The check permits that one platform message only after verifying
 the package version, internal tag, and actual shared library’s 64-bit little-endian
 AArch64 ELF header. It does not rewrite wheel metadata. Any other error fails
-before and after installation. There is no forced torch replacement. The source and these scripts
-remain in `/workspace/vllm-fork/examples/espnet/docker` inside the image.
+before and after installation. There is no forced torch replacement. The source
+and these scripts remain in `/workspace/vllm-fork/examples/espnet/docker` inside the image.
 
 Publication requires the built image to pass dependency, import and CLI
-checks. Record actual GPU inference for all three supported models before
-promoting this package variant for the first time. CPU checks alone do not
-establish CUDA ABI compatibility or audio generation quality.
+checks. Actual inference for all three supported models has also been checked
+on H100 and GB200; see [VALIDATION.md](VALIDATION.md). Repeat GPU validation
+when changing this package variant or the CUDA runtime. CPU checks alone do
+not establish CUDA ABI compatibility or audio generation quality.
