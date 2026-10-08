@@ -3060,6 +3060,14 @@ class GPUModelRunner(
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
             return [], [], []
+        if self.model_config.is_encoder_decoder:
+            # Cross-attention writes K/V in input-batch request order, which can
+            # differ from scheduler order after request insertion or reordering.
+            scheduled_encoder_inputs = {
+                req_id: scheduled_encoder_inputs[req_id]
+                for req_id in self.input_batch.req_ids
+                if req_id in scheduled_encoder_inputs
+            }
 
         mm_hashes = list[str]()
         mm_kwargs = list[tuple[str, MultiModalKwargsItem]]()
