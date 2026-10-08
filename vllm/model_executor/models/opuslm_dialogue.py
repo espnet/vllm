@@ -1822,6 +1822,9 @@ class OpusLMDialogueForConditionalGeneration(
     ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
+        elif inputs_embeds is None:
+            # Text-only runners still require the native multi-stream embedding.
+            inputs_embeds = self.embed_input_ids(input_ids)
 
         hidden_states = self.model(
             input_ids=input_ids,
