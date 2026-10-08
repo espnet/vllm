@@ -107,3 +107,37 @@ def test_trace_exact_external_match_precedes_child_parsing(request_ids):
     assert get_espnet_token_traces(model, request_ids) == {
         "1_task:0": {"token_ids": [[9]]}
     }
+
+
+@pytest.mark.parametrize(
+    "transform",
+    [
+        {"allowed_token_ids": [0]},
+        {"logit_bias": {0: 1.0}},
+        {"bad_words": ["word"]},
+        {"min_tokens": 1},
+        {"structured_outputs": object()},
+        {"thinking_token_budget": 1},
+    ],
+)
+def test_trace_rejects_unobserved_standard_sampler_transforms(transform):
+    """Model-level observations cannot score a later modified distribution."""
+    model = SimpleNamespace(
+        config=SimpleNamespace(num_stream=1),
+        _current_batch_req_ids=["request"],
+        _per_req_config={"request": {"collect_token_trace": True}},
+    )
+    begin_token_trace_step(model)
+    observe_primary_logits(model, torch.tensor([[0.0, 0.0]]))
+    params = SimpleNamespace(
+        temperature=1.0,
+        top_k=-1,
+        top_p=1.0,
+        min_p=0.0,
+        repetition_penalty=1.0,
+        presence_penalty=0.0,
+        frequency_penalty=0.0,
+        **transform,
+    )
+    with pytest.raises(ValueError, match="unmodified standard sampler"):
+        record_sampled_token_step(model, ["request"], [0], [params])

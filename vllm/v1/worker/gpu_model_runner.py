@@ -3701,6 +3701,14 @@ class GPUModelRunner(
                 continue
             params = req_state.sampling_params
             extra_args = dict(params.extra_args) if params and params.extra_args else {}
+            if (
+                extra_args.get("collect_token_trace")
+                and self.model_config.logits_processors
+            ):
+                raise ValueError(
+                    "ESPnet RL trace requires an unmodified standard sampler; "
+                    "custom engine logits processors are unsupported"
+                )
             if not is_opuslm:
                 # bagpiper: extra_args (mode / cfg / cfg_group_id / is_shadow)
                 # is the whole config, and the phase machine below defaults the

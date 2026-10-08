@@ -8,6 +8,7 @@ import soundfile as sf
 
 from vllm import LLM, SamplingParams
 from vllm.inputs import ExplicitEncoderDecoderPrompt
+from vllm.tokenizers.owsm import resolve_owsm_language_symbol
 
 
 def main():
@@ -17,7 +18,7 @@ def main():
     )
     parser.add_argument("--audio", nargs="+", required=True)
     parser.add_argument(
-        "--language", default="eng", help="OWSM three-letter language code"
+        "--language", default="eng", help="Checkpoint language symbol, ISO code or name"
     )
     parser.add_argument(
         "--task", default="asr", help="Checkpoint task symbol, e.g. asr"
@@ -44,7 +45,15 @@ def main():
         limit_mm_per_prompt={"audio": 1},
     )
     tokenizer = llm.get_tokenizer()
-    symbols = ["<sos>", f"<{args.language}>", f"<{args.task}>", "<notimestamps>"]
+    vocab = tokenizer.get_vocab()
+    language = resolve_owsm_language_symbol(vocab, args.language)
+    task = args.task.removeprefix("<").removesuffix(">")
+    task = (
+        resolve_owsm_language_symbol(vocab, task[3:], translation=True)
+        if task.startswith("st_")
+        else f"<{task}>"
+    )
+    symbols = ["<sos>", language, task, "<notimestamps>"]
     missing = [symbol for symbol in symbols if symbol not in tokenizer.get_vocab()]
     if missing:
         raise ValueError(f"Checkpoint does not define requested symbols: {missing}")

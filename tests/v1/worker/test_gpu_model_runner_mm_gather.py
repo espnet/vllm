@@ -250,3 +250,29 @@ def test_encoder_batch_without_scheduled_inputs_is_empty():
     assert runner._batch_mm_inputs_from_scheduler(
         SimpleNamespace(scheduled_encoder_inputs={})
     ) == ([], [], [])
+
+
+def test_multistream_trace_rejects_custom_engine_logits_processors():
+    """A later custom processor invalidates the model-level probability trace."""
+    runner = SimpleNamespace(
+        model_config=SimpleNamespace(logits_processors=["custom.Processor"]),
+        input_batch=SimpleNamespace(
+            num_reqs=1,
+            req_ids=["request"],
+            num_computed_tokens_cpu=np.array([0]),
+        ),
+        requests={
+            "request": SimpleNamespace(
+                num_tokens=4,
+                sampling_params=SimpleNamespace(
+                    extra_args={"collect_token_trace": True}
+                ),
+            )
+        },
+    )
+    with pytest.raises(ValueError, match="custom engine logits processors"):
+        GPUModelRunner._sync_audio_batch_state(
+            runner,
+            SimpleNamespace(_per_req_config={}),
+            SimpleNamespace(num_scheduled_tokens={"request": 4}),
+        )

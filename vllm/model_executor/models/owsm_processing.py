@@ -20,6 +20,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.renderers import TokenizeParams
+from vllm.tokenizers.owsm import resolve_owsm_language_symbol
 from vllm.transformers_utils.configs.owsm import OWSMConfig
 
 
@@ -84,7 +85,11 @@ class OWSMProcessingInfo(BaseProcessingInfo):
 
 class OWSMDummyInputsBuilder(BaseDummyInputsBuilder[OWSMProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        return "<sos><eng><asr><notimestamps>"
+        config = self.info.get_hf_config()
+        language = resolve_owsm_language_symbol(
+            config.espnet_config["token_list"], "eng"
+        )
+        return f"<sos>{language}<asr><notimestamps>"
 
     def get_dummy_mm_data(
         self,

@@ -128,6 +128,20 @@ def record_sampled_token_step(model, request_ids, sampled_tokens, sampling_param
                 "ESPnet RL trace requires top_p=1, min_p=0 "
                 "and disabled repetition penalties"
             )
+        if (
+            getattr(params, "allowed_token_ids", None) is not None
+            or getattr(params, "logit_bias", None)
+            or getattr(params, "bad_words", None)
+            or getattr(params, "bad_words_token_ids", None)
+            or getattr(params, "min_tokens", 0) != 0
+            or getattr(params, "structured_outputs", None) is not None
+            or getattr(params, "thinking_token_budget", None) is not None
+        ):
+            raise ValueError(
+                "ESPnet RL trace requires an unmodified standard sampler: "
+                "token restrictions, bias, minimum length, structured outputs "
+                "and thinking budgets are not observed by model-level tracing"
+            )
         logits = primary["logits"]
         active = int(torch.isfinite(logits).sum()) > 1
         temperature = float(params.temperature)

@@ -48,8 +48,11 @@ before generation. With 30 seconds at 16 kHz, v4 reserves 374 encoder positions,
 v3/v2 reserve 749, and v1 reserves 1498. Setting `pad_to_training_window=false`
 in the exported config enables variable-length clips and changes conditioning.
 
-The decoder prompt is explicit: `<sos><eng><asr><notimestamps>`. Other tasks use
-their checkpoint's language and task symbols. For Python APIs, pass an
+The decoder prompt is explicit: `<sos><eng><asr><notimestamps>` for v3+ and
+`<sos><en><asr><notimestamps>` for v1/v2. The example resolves `en`, `eng` or
+`english` to the symbol in the checkpoint vocabulary; translation tasks such as
+`st_en`/`st_eng` follow the same rule. Exact symbols take precedence, and missing
+or ambiguous aliases raise an error. For Python APIs, pass an
 `ExplicitEncoderDecoderPrompt` with an encoder placeholder `[0]` and audio, plus
 decoder token IDs including `<sos>`. No extra start token is injected.
 

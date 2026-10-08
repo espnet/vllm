@@ -19,7 +19,7 @@ from vllm.model_executor.models.owsm_processing import (
 )
 from vllm.multimodal.processing.context import InputProcessingContext, TimingContext
 from vllm.multimodal.processing.inputs import ProcessorInputs
-from vllm.tokenizers.owsm import OWSMTokenizer
+from vllm.tokenizers.owsm import OWSMTokenizer, resolve_owsm_language_symbol
 from vllm.transformers_utils.configs.owsm import OWSMConfig
 
 
@@ -133,3 +133,34 @@ def test_processor_rejects_audio_beyond_frozen_window(tokenizer_path):
     processor = make_processor(tokenizer_path, True)
     with pytest.raises(ValueError, match="exceeds"):
         processor._call_hf_processor("", {"audios": [np.zeros(480001)]}, {}, {})
+
+
+@pytest.mark.parametrize("language", ["en", "eng", "english", "<en>", "<eng>"])
+@pytest.mark.parametrize("symbol", ["en", "eng"])
+def test_language_alias_preserves_checkpoint_version_symbol(language, symbol):
+    tokens = [f"<{symbol}>", f"<st_{symbol}>"]
+    assert resolve_owsm_language_symbol(tokens, language) == f"<{symbol}>"
+    assert (
+        resolve_owsm_language_symbol(tokens, language, translation=True)
+        == f"<st_{symbol}>"
+    )
+
+
+def test_language_alias_rejects_unknown_and_ambiguous_symbols():
+    assert resolve_owsm_language_symbol(["<zh>"], "cmn") == "<zh>"
+    assert resolve_owsm_language_symbol(["<cmn>"], "zh") == "<cmn>"
+    assert resolve_owsm_language_symbol(["<en>", "<eng>"], "en") == "<en>"
+    with pytest.raises(ValueError, match="Ambiguous"):
+        resolve_owsm_language_symbol(["<en>", "<eng>"], "english")
+    with pytest.raises(ValueError, match="does not define"):
+        resolve_owsm_language_symbol(["<en>"], "missing")
+
+
+def test_dummy_prefix_uses_legacy_language_symbol(tokenizer_path):
+    processor = make_processor(tokenizer_path, True)
+    config = processor.info.get_hf_config()
+    config.espnet_config["token_list"] = ["<sos>", "<en>", "<asr>", "<notimestamps>"]
+    assert (
+        OWSMDummyInputsBuilder(processor.info).get_dummy_text({"audio": 1})
+        == "<sos><en><asr><notimestamps>"
+    )
