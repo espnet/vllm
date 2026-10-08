@@ -10,12 +10,17 @@ The inference example defaults to float32/TRITON_ATTN, the validated backend.
 
 The same adapter constructs the v4 base/small/medium, v3.2, v3.1 E-Branchformer,
 v3 Transformer, v2 Transformer/E-Branchformer and v1 Transformer configurations.
-Real pretrained weight and numerical validation covers v4 base 102M and
-v3.1 E-Branchformer small. Their complete native state loads strictly, including
-the older subsampling-key layout; decoder logits match ESPnet on CPU. Both
-checkpoints pass real H100 engine checks with float32, TRITON_ATTN, fixed and
-variable audio lengths, exact greedy tokens and selected logprob error below
-0.03 for 32-token generation. Other configurations have constructor checks.
+Nine public checkpoints pass strict native weight loading and real H100 engine
+checks with float32, TRITON_ATTN and fixed training-window inputs: v1, v2,
+v2 E-Branchformer, v3, v3.1 E-Branchformer small, v3.2, and v4 base/small/medium.
+The v4 base and v3.1 small checkpoints also pass variable-length checks and have
+CPU decoder numerical evidence. Each engine run compares 11 cases, including
+exact greedy tokens, actual sampled-token raw logprobs, reversed input order,
+and delayed request insertion, with a fixed logprob error limit of 0.03 for
+32-token generation. Delayed insertion does not prove simultaneous encoder
+prefill and old-request decode in the same scheduler batch; production ordering
+also has dedicated regression tests. Dynamic inputs on the other seven
+checkpoints have not been evaluated.
 BF16/FlashAttention has not passed strict native token/logprob equivalence:
 reduced-precision attention and incremental execution can change rounding and
 greedy choices. OWSM-CTC is a separate architecture and is rejected.
