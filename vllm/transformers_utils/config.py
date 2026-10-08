@@ -135,6 +135,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     speechlm="BagpiperConfig",
     opuslm="OpusLMConfig",
     opuslm_dialogue="OpusLMDialogueConfig",
+    owsm="OWSMConfig",
     qwen3_next="Qwen3NextConfig",
     qwen3_5="Qwen3_5Config",
     qwen3_5_text="Qwen3_5TextConfig",

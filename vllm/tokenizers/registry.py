@@ -51,6 +51,7 @@ _VLLM_TOKENIZERS = {
     "mistral": ("mistral", "MistralTokenizer"),
     "opuslm": ("opuslm", "OpusLMTokenizer"),
     "opuslm_dialogue": ("opuslm_dialogue", "OpusLMDialogueTokenizer"),
+    "owsm": ("owsm", "OWSMTokenizer"),
     # Inkling uses the plain HF tokenizer for token operations; the "inkling"
     # mode exists to select the InklingRenderer, which renders chat to
     # token ids natively (Inkling has no Jinja chat template).
@@ -221,9 +222,7 @@ _OPUSLM_TOKENIZER_KWARGS = {
 }
 
 
-def _inject_opuslm_tokenizer_kwargs(
-    model_type: str, hf_config, kwargs: dict
-) -> dict:
+def _inject_opuslm_tokenizer_kwargs(model_type: str, hf_config, kwargs: dict) -> dict:
     """Fill OpusLM tokenizer kwargs from the model's hf_config.
 
     Both OpusLM tokenizers configure their global-vocab shift and their ESPnet
@@ -234,8 +233,8 @@ def _inject_opuslm_tokenizer_kwargs(
     kwarg the caller passed explicitly still wins.
     """
     kwargs = dict(kwargs)
-    for suffix, field, default in _OPUSLM_TOKENIZER_KWARGS[model_type]:
-        value = getattr(hf_config, field, None)
+    for suffix, config_field, default in _OPUSLM_TOKENIZER_KWARGS[model_type]:
+        value = getattr(hf_config, config_field, None)
         kwargs.setdefault(
             f"{model_type}_{suffix}",
             default if value is None else int(value),

@@ -102,6 +102,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "BagpiperTextConfig": "vllm.transformers_utils.configs.bagpiper",
     "OpusLMConfig": "vllm.transformers_utils.configs.opuslm",
     "OpusLMDialogueConfig": "vllm.transformers_utils.configs.opuslm_dialogue",
+    "OWSMConfig": "vllm.transformers_utils.configs.owsm",
     "Qwen3NextConfig": "vllm.transformers_utils.configs.qwen3_next",
     "Qwen3_5Config": "vllm.transformers_utils.configs.qwen3_5",
     "Qwen3_5TextConfig": "vllm.transformers_utils.configs.qwen3_5",
@@ -116,6 +117,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
 }
 
 __all__ = [
+    "OWSMConfig",
     "AfmoeConfig",
     "ArcticConfig",
     "AXK1Config",

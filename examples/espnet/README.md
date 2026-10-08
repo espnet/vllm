@@ -1,6 +1,8 @@
 # ESPnet audio-LM examples
 
 Tooling for the ESPnet audio language models supported by this fork:
+**OWSM** autoregressive encoder-decoder speech recognition/translation (see
+[OWSM inference](OWSM.md)),
 **bagpiper** (Qwen3-8B backbone, text + audio generation with optional CFG),
 **opuslm** (OLMo-2-7B backbone, TTS / ASR / text-LM), and
 **opuslm_dialogue** (SmolLM2-1.7B backbone, spoken dialogue).

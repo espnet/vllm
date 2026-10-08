@@ -345,6 +345,7 @@ _SEQUENCE_CLASSIFICATION_MODELS = {
 }
 
 _MULTIMODAL_MODELS = {
+    "OWSMForConditionalGeneration": ("owsm", "OWSMForConditionalGeneration"),
     # [Decoder-only]
     "AriaForConditionalGeneration": ("aria", "AriaForConditionalGeneration"),
     "AudioFlamingo3ForConditionalGeneration": (

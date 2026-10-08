@@ -1287,6 +1287,13 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
         is_available_online=False,
     ),
+    "OWSMForConditionalGeneration": _HfExamplesInfo(
+        "owsm_v4_base_102M-vllm",
+        tokenizer_mode="owsm",
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        is_available_online=False,
+    ),
     "Ovis": _HfExamplesInfo(
         "AIDC-AI/Ovis2-1B",
         trust_remote_code=True,

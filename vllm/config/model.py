@@ -86,6 +86,7 @@ RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
 TokenizerMode = Literal[
+    "owsm",
     "auto",
     "hf",
     "slow",
