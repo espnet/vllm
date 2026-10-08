@@ -7,9 +7,10 @@ epsilon are preserved. The initial backend requires TP=PP=1 and eager execution.
 
 The same adapter constructs the v4 base/small/medium, v3.2, v3.1 E-Branchformer,
 v3 Transformer, v2 Transformer/E-Branchformer and v1 Transformer configurations.
-Real pretrained weight and numerical validation currently covers v4 base 102M;
-the other configurations have constructor checks. GPU engine validation is
-pending. OWSM-CTC is a separate architecture and is rejected.
+Real pretrained weight and numerical validation covers v4 base 102M and
+v3.1 E-Branchformer small. Their complete native state loads strictly, including
+the older subsampling-key layout; decoder logits match ESPnet on CPU. The other
+configurations have constructor checks. GPU engine validation is pending. OWSM-CTC is a separate architecture and is rejected.
 
 Install a checkpoint-compatible ESPnet release in the inference environment.
 Use `uv` and the vLLM checkout's documented precompiled Python installation.
