@@ -141,3 +141,26 @@ def test_trace_rejects_unobserved_standard_sampler_transforms(transform):
     )
     with pytest.raises(ValueError, match="unmodified standard sampler"):
         record_sampled_token_step(model, ["request"], [0], [params])
+
+
+@pytest.mark.parametrize("top_k", [1, 2])
+def test_trace_rejects_primary_top_k_with_sampler_dependent_ties(top_k):
+    """A sampler may retain more than k equal logits at the cutoff."""
+    model = SimpleNamespace(
+        config=SimpleNamespace(num_stream=1),
+        _current_batch_req_ids=["request"],
+        _per_req_config={"request": {"collect_token_trace": True}},
+    )
+    begin_token_trace_step(model)
+    observe_primary_logits(model, torch.zeros(1, 3))
+    params = SimpleNamespace(
+        temperature=1.0,
+        top_k=top_k,
+        top_p=1.0,
+        min_p=0.0,
+        repetition_penalty=1.0,
+        presence_penalty=0.0,
+        frequency_penalty=0.0,
+    )
+    with pytest.raises(ValueError, match="full primary sampling support"):
+        record_sampled_token_step(model, ["request"], [0], [params])

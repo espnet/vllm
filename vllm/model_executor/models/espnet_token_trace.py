@@ -146,17 +146,13 @@ def record_sampled_token_step(model, request_ids, sampled_tokens, sampling_param
         active = int(torch.isfinite(logits).sum()) > 1
         temperature = float(params.temperature)
         top_k = int(params.top_k)
+        if 0 < top_k < logits.shape[-1]:
+            raise ValueError(
+                "ESPnet RL trace requires full primary sampling support; "
+                "finite top-k cutoff ties depend on the standard sampler backend"
+            )
         distribution = logits / temperature
-        if 0 < top_k < distribution.shape[-1]:
-            values, indices = distribution.topk(top_k)
-            matches = (indices == token).nonzero().flatten()
-            if len(matches) != 1:
-                raise RuntimeError(
-                    "Primary sampled token is outside the recorded top-k support"
-                )
-            score = float(values.log_softmax(-1)[matches[0]])
-        else:
-            score = float(distribution.log_softmax(-1)[token])
+        score = float(distribution.log_softmax(-1)[token])
         tokens, masks = [int(token)], [active]
         scores = [score if active else 0.0]
         contracts = [_contract(logits, temperature, top_k)]
