@@ -74,6 +74,24 @@ def test_unrequested_trace_does_not_retain_model_logits():
     assert not model._espnet_token_traces
 
 
+def test_dummy_profile_codec_samples_have_no_request_trace():
+    model = SimpleNamespace(
+        config=SimpleNamespace(num_stream=2),
+        _current_batch_req_ids=[],
+        _per_req_config={},
+    )
+    begin_token_trace_step(model)
+    logits = torch.tensor([[0.5, 0.9]])
+    sampled = torch.tensor([1])
+    observe_secondary_samples(
+        model, [0], 1, logits, sampled, torch.tensor([True]), 1.0, 0
+    )
+    assert not model._espnet_token_trace_pending
+    assert not model._espnet_token_traces
+    torch.testing.assert_close(logits, torch.tensor([[0.5, 0.9]]))
+    torch.testing.assert_close(sampled, torch.tensor([1]))
+
+
 def test_forced_primary_token_is_not_a_policy_action():
     model = SimpleNamespace(
         config=SimpleNamespace(num_stream=1),

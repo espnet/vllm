@@ -66,6 +66,10 @@ def observe_secondary_samples(
     """
     pending = getattr(model, "_espnet_token_trace_pending", {})
     for row, position in enumerate(positions):
+        # Engine profiling invokes compute_logits on dummy positions without
+        # real requests. Those samples do not belong to an RL trajectory.
+        if not 0 <= position < len(model._current_batch_req_ids):
+            continue
         request_id = model._current_batch_req_ids[position]
         if not _enabled(model, request_id):
             continue
