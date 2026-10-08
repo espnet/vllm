@@ -14,6 +14,7 @@ from vllm.model_executor.layers.attention import Attention, CrossAttention
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal
 from .owsm_decoder import OWSMDecoder
@@ -104,6 +105,21 @@ class OWSMEncoder(nn.Module):
             )
         encoder_conf.pop("gradient_checkpoint_layers", None)
         self.encoder = encoder_class(input_size=input_size, **encoder_conf)
+        # ESPnet builds sinusoidal caches on CPU in fp32 before model.to().
+        # CUDA sin/cos and reduced-precision construction can round differently.
+        from espnet2.legacy.nets.pytorch_backend.transformer.embedding import (
+            PositionalEncoding,
+            RelPositionalEncoding,
+        )
+
+        with torch.device("cpu"), set_default_torch_dtype(torch.float32):
+            for module in self.encoder.modules():
+                if isinstance(module, (PositionalEncoding, RelPositionalEncoding)):
+                    length = module.pe.shape[1]
+                    if isinstance(module, RelPositionalEncoding):
+                        length = (length + 1) // 2
+                    module.pe = None
+                    module.extend_pe(torch.empty(1, length))
         if self.encoder.output_size() != config.d_model:
             raise ValueError("OWSM encoder and decoder hidden sizes disagree")
         # ESPnet's mel matrix is built with torch.from_numpy, which ignores the

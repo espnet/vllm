@@ -24,10 +24,20 @@ def main():
     )
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument(
+        "--dtype", choices=["float32", "bfloat16", "float16"], default="float32"
+    )
+    parser.add_argument(
+        "--attention-backend",
+        choices=["TRITON_ATTN", "FLASH_ATTN"],
+        default="TRITON_ATTN",
+    )
     args = parser.parse_args()
     llm = LLM(
         model=args.model,
         tokenizer_mode="owsm",
+        dtype=args.dtype,
+        attention_backend=args.attention_backend,
         tensor_parallel_size=1,
         enforce_eager=True,
         enable_prefix_caching=False,

@@ -5,16 +5,26 @@ Transformer decoder. Self-attention and cross-attention use vLLM KV caches.
 Decoder biases, sinusoidal positions, embedding scaling and ESPnet's LayerNorm
 epsilon are preserved. The initial backend requires TP=PP=1 and eager execution.
 
+The inference example defaults to float32/TRITON_ATTN, the validated backend.
+`--dtype` and `--attention-backend` select other numerical paths explicitly.
+
 The same adapter constructs the v4 base/small/medium, v3.2, v3.1 E-Branchformer,
 v3 Transformer, v2 Transformer/E-Branchformer and v1 Transformer configurations.
 Real pretrained weight and numerical validation covers v4 base 102M and
 v3.1 E-Branchformer small. Their complete native state loads strictly, including
-the older subsampling-key layout; decoder logits match ESPnet on CPU. The other
-configurations have constructor checks. GPU engine validation is pending. OWSM-CTC is a separate architecture and is rejected.
+the older subsampling-key layout; decoder logits match ESPnet on CPU. Both
+checkpoints pass real H100 engine checks with float32, TRITON_ATTN, fixed and
+variable audio lengths, exact greedy tokens and selected logprob error below
+0.03 for 32-token generation. Other configurations have constructor checks.
+BF16/FlashAttention has not passed strict native token/logprob equivalence:
+reduced-precision attention and incremental execution can change rounding and
+greedy choices. OWSM-CTC is a separate architecture and is rejected.
 
 Install a checkpoint-compatible ESPnet release in the inference environment.
 Use `uv` and the vLLM checkout's documented precompiled Python installation.
 The native frontend uses float32 even when encoder/decoder weights use bf16.
+Sinusoidal caches are initialized on CPU in float32, matching native ESPnet
+initialization before the model moves to its inference device and precision.
 
 Download a native checkpoint, saved training config, SentencePiece model and
 normalization statistics. Set the config's `bpemodel` and `normalize_conf.stats_file`

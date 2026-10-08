@@ -12,7 +12,8 @@ import pytest
 import torch
 from torch import nn
 
-from vllm.model_executor.models.owsm_decoder import OWSMDecoder
+from vllm.model_executor.models.owsm_decoder import OWSMDecoder, OWSMPositionalEncoding
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 
 class CachedReferenceAttention(nn.Module):
@@ -147,3 +148,56 @@ def test_logits_and_incremental_cache_match_espnet(
             incremental(tokens[position : position + 1], torch.tensor([position]), None)
         )
     torch.testing.assert_close(torch.cat(steps), actual_hidden, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@torch.inference_mode()
+def test_encoder_positions_preserve_native_fp32_initialization_in_bf16(device):
+    """Reduced model initialization must not pre-round the native position cache."""
+    espnet = pytest.importorskip("espnet2.asr.encoder.e_branchformer_encoder")
+    from vllm.model_executor.models.owsm import OWSMEncoder
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA construction required")
+
+    encoder_conf = {
+        "output_size": 32,
+        "attention_heads": 4,
+        "linear_units": 64,
+        "cgmlp_linear_units": 64,
+        "num_blocks": 1,
+        "dropout_rate": 0.0,
+        "input_layer": "conv2d8",
+    }
+    config = SimpleNamespace(
+        espnet_config={
+            "encoder": "e_branchformer",
+            "encoder_conf": encoder_conf,
+            "frontend_conf": {"n_mels": 80},
+            "normalize": None,
+        },
+        d_model=32,
+    )
+    native = espnet.EBranchformerEncoder(input_size=80, **encoder_conf)
+    with torch.device(device), set_default_torch_dtype(torch.bfloat16):
+        actual = OWSMEncoder(config)
+    native_pe = native.embed.pos_enc.pe
+    actual_pe = actual.encoder.embed.pos_enc.pe
+    assert actual_pe.dtype == torch.float32
+    torch.testing.assert_close(actual_pe, native_pe, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA construction required")
+@torch.inference_mode()
+def test_cuda_decoder_positions_match_native_cpu_sinusoidal_table():
+    """Long positions must use the same CPU sin/cos values as ESPnet."""
+    espnet = pytest.importorskip(
+        "espnet2.legacy.nets.pytorch_backend.transformer.embedding"
+    )
+    native = espnet.PositionalEncoding(384, 0.0, max_len=5000)
+    with torch.device("cuda"), set_default_torch_dtype(torch.bfloat16):
+        actual = OWSMPositionalEncoding(384, 5000)
+    embeddings = torch.zeros(5000, 384, dtype=torch.bfloat16, device="cuda")
+    output = actual(embeddings, torch.arange(5000, device="cuda"))
+    expected = native(embeddings.unsqueeze(0))[0]
+    torch.testing.assert_close(output, expected, rtol=0, atol=0)

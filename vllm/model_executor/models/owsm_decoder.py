@@ -19,14 +19,17 @@ class OWSMPositionalEncoding(nn.Module):
         super().__init__()
         if d_model % 2:
             raise ValueError("OWSM requires an even decoder hidden size")
-        positions = torch.arange(max_positions, dtype=torch.float32).unsqueeze(1)
-        frequencies = torch.exp(
-            torch.arange(0, d_model, 2, dtype=torch.float32)
-            * -(math.log(10000.0) / d_model)
-        )
-        table = torch.empty(max_positions, d_model, dtype=torch.float32)
-        table[:, 0::2] = torch.sin(positions * frequencies)
-        table[:, 1::2] = torch.cos(positions * frequencies)
+        device = torch.empty(0).device
+        with torch.device("cpu"):
+            positions = torch.arange(max_positions, dtype=torch.float32).unsqueeze(1)
+            frequencies = torch.exp(
+                torch.arange(0, d_model, 2, dtype=torch.float32)
+                * -(math.log(10000.0) / d_model)
+            )
+            table = torch.empty(max_positions, d_model, dtype=torch.float32)
+            table[:, 0::2] = torch.sin(positions * frequencies)
+            table[:, 1::2] = torch.cos(positions * frequencies)
+        table = table.to(device)
         self.register_buffer("pe", table, persistent=False)
         self.xscale = 1.0 if scaled else math.sqrt(d_model)
         if scaled:
