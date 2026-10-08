@@ -31,6 +31,7 @@ _VLLM_RENDERERS = {
     # HF chat-template rendering.
     "opuslm": ("hf", "HfRenderer"),
     "opuslm_dialogue": ("hf", "HfRenderer"),
+    "owsm": ("hf", "HfRenderer"),
     "terratorch": ("terratorch", "TerratorchRenderer"),
     "inkling": ("inkling", "InklingRenderer"),
 }
