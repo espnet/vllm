@@ -178,6 +178,7 @@ def record_sampled_token_step(model, request_ids, sampled_tokens, sampling_param
             {
                 "token_ids": [],
                 "log_probs": [],
+                "stream_log_probs": [],
                 "action_mask": [],
                 "stream_mask": [],
                 "sampling_contracts": [],
@@ -186,6 +187,7 @@ def record_sampled_token_step(model, request_ids, sampled_tokens, sampling_param
         )
         trace["token_ids"].append(tokens)
         trace["log_probs"].append(joint)
+        trace["stream_log_probs"].append(scores)
         trace["action_mask"].append(any(masks))
         trace["stream_mask"].append(masks)
         trace["sampling_contracts"].append(contracts)

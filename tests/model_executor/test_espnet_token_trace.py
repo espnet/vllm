@@ -49,6 +49,14 @@ def test_trace_preserves_joint_samples_and_excludes_forced_delay_padding():
     assert result["stream_mask"] == [[True, True, False]]
     expected = primary.log_softmax(-1)[0, 1] + secondary.log_softmax(-1)[0, 2]
     assert result["log_probs"][0] == pytest.approx(float(expected))
+    assert result["stream_log_probs"][0] == pytest.approx(
+        [
+            float(primary.log_softmax(-1)[0, 1]),
+            float(secondary.log_softmax(-1)[0, 2]),
+            0.0,
+        ]
+    )
+    assert sum(result["stream_log_probs"][0]) == result["log_probs"][0]
     assert result["sampling_contracts"][0][1]["allowed_ranges"] == [[0, 1], [2, 3]]
     torch.testing.assert_close(secondary, original)
     assert not get_espnet_token_traces(model, ["external"])
@@ -86,6 +94,7 @@ def test_forced_primary_token_is_not_a_policy_action():
     record_sampled_token_step(model, ["request"], [1], [params])
     trace = get_espnet_token_traces(model, ["request"])["request:0"]
     assert trace["action_mask"] == [False] and trace["log_probs"] == [0.0]
+    assert trace["stream_log_probs"] == [[0.0]]
 
 
 @pytest.mark.parametrize(
