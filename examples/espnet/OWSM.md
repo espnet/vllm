@@ -7,6 +7,14 @@ epsilon are preserved. The initial backend requires TP=PP=1 and eager execution.
 
 The inference example defaults to float32/TRITON_ATTN, the validated backend.
 `--dtype` and `--attention-backend` select other numerical paths explicitly.
+Float32 inference explicitly uses `TRITON_F32_DEFAULT=ieee` and disables
+torch/cuBLAS TF32. Torch flags alone do not control Triton's `tl.dot` default.
+On a fixed-action v4 diagnosis with the same real audio and 173 retained actions,
+the maximum native/vLLM logprob difference decreased from 0.03504658 with
+Triton TF32 to 0.00010395 with IEEE. This is a numerical diagnosis; each RL run
+still requires its own probability gate and update/export validation.
+Direct Python API callers should set these precision controls before engine
+construction when matching the native float32 policy.
 
 The same adapter constructs the v4 base/small/medium, v3.2, v3.1 E-Branchformer,
 v3 Transformer, v2 Transformer/E-Branchformer and v1 Transformer configurations.

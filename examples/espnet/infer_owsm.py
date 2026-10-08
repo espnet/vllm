@@ -3,8 +3,10 @@
 """OWSM v4/v3.x autoregressive audio generation with vLLM."""
 
 import argparse
+import os
 
 import soundfile as sf
+import torch
 
 from vllm import LLM, SamplingParams
 from vllm.inputs import ExplicitEncoderDecoderPrompt
@@ -34,6 +36,13 @@ def main():
         default="TRITON_ATTN",
     )
     args = parser.parse_args()
+    if args.dtype == "float32":
+        # Torch/cuBLAS flags do not control Triton's independent tl.dot default.
+        os.environ["TRITON_F32_DEFAULT"] = "ieee"
+        os.environ["NVIDIA_TF32_OVERRIDE"] = "0"
+        os.environ["TORCH_ALLOW_TF32_CUBLAS_OVERRIDE"] = "0"
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
     llm = LLM(
         model=args.model,
         tokenizer_mode="owsm",
