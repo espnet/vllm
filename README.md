@@ -16,8 +16,13 @@ accepted at **Interspeech 2026**.
 | `bagpiper` | Qwen3-8B + Qwen3-Omni audio tower | Scene-conditioned speech generation with optional CFG; text and audio understanding | [`espnet/bagpiper-tts-sft`](https://huggingface.co/espnet/bagpiper-tts-sft) |
 | `opuslm` | OLMo-2-7B | Text-to-speech, speech recognition, text continuation | [`espnet/OpusLM_7B_Anneal`](https://huggingface.co/espnet/OpusLM_7B_Anneal) |
 | `opuslm_dialogue` | SmolLM2-1.7B | Spoken and text dialogue | [`espnet/multi_turn_SDS_RLAIF`](https://huggingface.co/espnet/multi_turn_SDS_RLAIF) |
+| `owsm` | ESPnet Transformer / E-Branchformer encoder-decoder | Speech recognition and speech translation | [`espnet/owsm_v4_base_102M`](https://huggingface.co/espnet/owsm_v4_base_102M) |
 
-Use the model names above for `--served-model-name` and the matching
+OWSM v1–v4 encoder-decoder checkpoints use offline inference with an explicit
+audio encoder prompt and text decoder prompt. See the [OWSM guide](examples/espnet/OWSM.md)
+for conversion and inference; the validated baseline is FP32/TRITON_ATTN on one GPU.
+
+Use the audio language model names for `--served-model-name` and the matching
 `model_type` in `config.json`. Official ESPnet checkpoints require conversion
 before serving; the converters generate the configuration, tokenizer assets,
 and safetensors files. See [Model checkpoints and conversion](examples/espnet/MODELS.md)
@@ -138,6 +143,7 @@ to listen; prompts and generation settings are in the
 
 - [Getting started (中文)](examples/espnet/GETTING_STARTED.zh.md)
 - [Model checkpoints and conversion](examples/espnet/MODELS.md)
+- [OWSM conversion and offline inference](examples/espnet/OWSM.md)
 - [Reference clients](examples/espnet/clients/README.md)
 - [Docker build and deployment](examples/espnet/docker/README.md)
 - [Docker Hub publishing](examples/espnet/docker/PUBLISHING.md)

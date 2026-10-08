@@ -596,6 +596,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `Ovis2_5` | Ovis2.5 | T + I<sup>+</sup> + V | `AIDC-AI/Ovis2.5-9B`, etc. | | |
 | `Ovis2_6ForCausalLM` | Ovis2.6 | T + I<sup>+</sup> + V | `AIDC-AI/Ovis2.6-2B`, etc. | | |
 | `Ovis2_6_MoeForCausalLM` | Ovis2.6 | T + I<sup>+</sup> + V | `AIDC-AI/Ovis2.6-30B-A3B`, etc. | | |
+| `OWSMForConditionalGeneration` | OWSM v1–v4 encoder-decoder | T + A | `espnet/owsm_v4_base_102M`, `espnet/owsm_v3.1_ebf_small`, etc. (native checkpoint conversion required) | | |
 | `PaddleOCRVLForConditionalGeneration` | Paddle-OCR | T + I<sup>+</sup> | `PaddlePaddle/PaddleOCR-VL`, etc. | | |
 | `PaliGemmaForConditionalGeneration` | PaliGemma, PaliGemma 2 | T + I<sup>E</sup> | `google/paligemma-3b-pt-224`, `google/paligemma-3b-mix-224`, `google/paligemma2-3b-ft-docci-448`, etc. | ✅︎ | ✅︎ |
 | `Phi3VForCausalLM` | Phi-3-Vision, Phi-3.5-Vision | T + I<sup>E+</sup> | `microsoft/Phi-3-vision-128k-instruct`, `microsoft/Phi-3.5-vision-instruct`, etc. | | ✅︎ |
@@ -634,6 +635,12 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 <sup>*</sup> Only specific variants of the model support this modality (see notes below).</br>
 <sup>Q</sup> `Qwen*-VL` officially uses `qwen_vl_utils` for image preprocessing, while vLLM uses `transformers`' `video_processing_qwen*`, which leads to slightly different results compared to the official Hugging Face repository examples.
+
+!!! note
+    `OWSMForConditionalGeneration` in this ESPnet fork requires native checkpoint
+    conversion and an explicit encoder-decoder prompt. See the
+    [OWSM guide](../../examples/espnet/OWSM.md) for offline inference.
+    The validated baseline uses FP32/TRITON_ATTN, eager execution and TP=PP=1.
 
 !!! note
     For `Dots3NoteForCausalLM`, the vision and audio towers are only loaded when the
