@@ -25,6 +25,11 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.logger import init_logger
+from vllm.model_executor.models.espnet_token_trace import (
+    begin_token_trace_step,
+    observe_primary_logits,
+    observe_secondary_samples,
+)
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModal,
@@ -816,6 +821,7 @@ class BagpiperForConditionalGeneration(
           - text:   everything else (text range, eos, eot, …)
         """
         cfg = self.config
+        begin_token_trace_step(self)
         lm_head = self.language_model.lm_head
         logits_processor = self.language_model.logits_processor
 
@@ -1038,6 +1044,7 @@ class BagpiperForConditionalGeneration(
                         stream0_logits[i] = float("-inf")
                         stream0_logits[i, cfg.eos_token_id] = 0.0
 
+        observe_primary_logits(self, stream0_logits)
         return stream0_logits
 
     def _sample_and_buffer_streams(
@@ -1145,6 +1152,18 @@ class BagpiperForConditionalGeneration(
                     s_logits[row_indices],
                     temperature=temperature,
                     top_k=top_k,
+                )
+            for temperature, top_k, row_indices in sampling_groups:
+                rows = row_indices.tolist()
+                observe_secondary_samples(
+                    self,
+                    [main_audio_positions[row] for row in rows],
+                    s,
+                    s_logits[row_indices],
+                    sampled[row_indices],
+                    torch.ones(len(rows), dtype=torch.bool, device=device),
+                    temperature,
+                    top_k,
                 )
             new_buffer[:, s - 1] = sampled
 

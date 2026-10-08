@@ -36,6 +36,11 @@ from vllm.config import VllmConfig
 # vllm.multimodal.inputs to vllm.inputs.
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.logger import init_logger
+from vllm.model_executor.models.espnet_token_trace import (
+    begin_token_trace_step,
+    observe_primary_logits,
+    observe_secondary_samples,
+)
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModal,
@@ -1843,6 +1848,7 @@ class OpusLMDialogueForConditionalGeneration(
           "audio_stop" -> force EOS (5) to stop the request
         """
         cfg = self.config
+        begin_token_trace_step(self)
         N = hidden_states.shape[0]
         dev = hidden_states.device
 
@@ -1978,6 +1984,7 @@ class OpusLMDialogueForConditionalGeneration(
                 precomputed_stream_logits=all_stream_logits,
             )
 
+        observe_primary_logits(self, stream0_logits)
         return stream0_logits
 
     def _sample_and_buffer_streams(
@@ -2066,6 +2073,18 @@ class OpusLMDialogueForConditionalGeneration(
             flush_mask = row_is_flush & (row_flush_step > s)
             sampled[flush_mask] = 0
 
+            for temperature, top_k, row_indices in sampling_groups:
+                rows = row_indices.tolist()
+                observe_secondary_samples(
+                    self,
+                    [sampled_positions[row] for row in rows],
+                    s,
+                    s_logits[row_indices],
+                    sampled[row_indices],
+                    (~warmup_mask & ~flush_mask)[row_indices],
+                    temperature,
+                    top_k,
+                )
             new_buffer[:, s - 1] = sampled
 
         for j, pos in enumerate(sampled_positions):

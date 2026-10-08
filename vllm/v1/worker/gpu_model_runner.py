@@ -5366,6 +5366,19 @@ class GPUModelRunner(
                 valid_sampled_token_ids,
                 invalid_req_indices,
             )
+            from vllm.model_executor.models.espnet_token_trace import (
+                record_sampled_token_step,
+            )
+
+            record_sampled_token_step(
+                audio_model,
+                req_ids_output_copy,
+                audio_sampled_tokens,
+                [
+                    self.requests[req_id].sampling_params
+                    for req_id in req_ids_output_copy
+                ],
+            )
             self._advance_audio_phases(
                 audio_model, req_ids_output_copy, audio_sampled_tokens
             )
