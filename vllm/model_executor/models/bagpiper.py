@@ -11,7 +11,7 @@ Features:
 """
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 import torch.nn as nn
@@ -22,7 +22,7 @@ from transformers import BatchFeature
 from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
@@ -186,7 +186,7 @@ class BagpiperDummyInputsBuilder(BaseDummyInputsBuilder[BagpiperProcessingInfo])
             "audio": self._get_dummy_audios(
                 length=target_audio_length,
                 num_audios=num_audios,
-                overrides=audio_overrides,
+                overrides=cast(AudioDummyOptions | None, audio_overrides),
             ),
         }
 
@@ -241,7 +241,7 @@ class BagpiperMultiModalProcessor(
 
         # Extract audio data
         mm_data = dict(mm_data)
-        audios = mm_data.pop("audios", [])
+        audios = cast(list[np.ndarray], mm_data.pop("audios", []))
 
         # Process audio features
         audio_inputs = {}
@@ -290,7 +290,7 @@ class BagpiperMultiModalProcessor(
             audio_inputs["audio_feature_lengths"] = attention_mask.sum(-1)
 
         # Tokenize text
-        text_inputs = tokenizer(prompt, return_tensors="pt")
+        text_inputs = cast(Any, tokenizer)(prompt, return_tensors="pt")
 
         return BatchFeature(data={**text_inputs, **audio_inputs})
 
@@ -1119,6 +1119,7 @@ class BagpiperForConditionalGeneration(
             h_s = main_audio_hidden + stream_emb
 
             if shadow_hidden_stack is not None:
+                assert cfg_vals_tensor is not None
                 # Batch main + shadow in one lm_head call
                 h_s_shadow = shadow_hidden_stack + stream_emb  # [K, H]
                 all_h = torch.cat([h_s, h_s_shadow], dim=0)  # [N+K, H]
@@ -1350,6 +1351,7 @@ class BagpiperForConditionalGeneration(
             ).eval()
             # Move to same device as the language model
             device = next(self.language_model.parameters()).device
+            assert self._xcodec_model is not None
             self._xcodec_model = self._xcodec_model.to(device)
             logger.info("Loaded Xcodec model from %s", self._xcodec_model_tag)
         return self._xcodec_model

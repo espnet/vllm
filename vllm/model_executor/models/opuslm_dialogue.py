@@ -31,6 +31,7 @@ import torch.nn as nn
 from transformers.feature_extraction_utils import BatchFeature
 
 from vllm.config import VllmConfig
+
 # NOTE(v0.28.0): ModalityData / MultiModalDataDict moved from
 # vllm.multimodal.inputs to vllm.inputs.
 from vllm.inputs import ModalityData, MultiModalDataDict
@@ -80,6 +81,7 @@ _AUDIO_SAMPLING_RATE = 16000
 # Audio input tokenizer (shared with base OpusLM — same codec pipeline)
 # ---------------------------------------------------------------------------
 
+
 class _OpusLMDialogueAudioInputProcessor:
     """Server-side audio tokenizer: waveform -> (SSL stream0, DAC streams1-8).
 
@@ -124,14 +126,16 @@ class _OpusLMDialogueAudioInputProcessor:
                 "Please ensure ESPnet runtime dependencies are installed."
             ) from e
 
-        self._dac_model = AudioCoding.from_pretrained(
-            self.cfg.dac_hf_model_tag
-        ).model.eval().to(self.device)
+        self._dac_model = (
+            AudioCoding.from_pretrained(self.cfg.dac_hf_model_tag)
+            .model.eval()
+            .to(self.device)
+        )
         logger.info("Loaded DAC encoder on %s", self.device)
         return self._dac_model
 
     def _resolve_xeus_paths(self) -> tuple[str, str, str]:
-        from huggingface_hub import hf_hub_download
+        from vllm.transformers_utils.repo_utils import hf_api
 
         repo = self.cfg.xeus_hf_model_tag
         ckpt_file = getattr(
@@ -140,12 +144,12 @@ class _OpusLMDialogueAudioInputProcessor:
         km_file = self.cfg.km_model_filename
         config_file = getattr(self.cfg, "xeus_config_filename", "model/config.yaml")
 
-        ckpt_path = hf_hub_download(repo, ckpt_file)
-        km_path = hf_hub_download(repo, km_file)
+        ckpt_path = hf_api().hf_hub_download(repo, ckpt_file)
+        km_path = hf_api().hf_hub_download(repo, km_file)
         # SSLTask.build_model_from_file(None, ckpt) falls back to a config.yaml
         # sitting next to the checkpoint, and hf_hub_download materialises only
         # the files it is asked for. Fetch the config and pass it explicitly.
-        config_path = hf_hub_download(repo, config_file)
+        config_path = hf_api().hf_hub_download(repo, config_file)
         return ckpt_path, km_path, config_path
 
     def _load_ssl_and_kmeans(self):
@@ -174,12 +178,15 @@ class _OpusLMDialogueAudioInputProcessor:
         logger.info("Loaded XEUS SSL model on %s", self.device)
         self._kmeans_model = joblib.load(km_path)
         # Cache K-means centroids as GPU tensor for fast inference
-        self._km_centroids = torch.from_numpy(
-            self._kmeans_model.cluster_centers_
-        ).float().to(self.device)
+        self._km_centroids = (
+            torch.from_numpy(self._kmeans_model.cluster_centers_)
+            .float()
+            .to(self.device)
+        )
         logger.info(
             "Cached K-means centroids [%s] on %s",
-            self._km_centroids.shape, self.device,
+            self._km_centroids.shape,
+            self.device,
         )
         return self._ssl_model, self._kmeans_model
 
@@ -205,7 +212,7 @@ class _OpusLMDialogueAudioInputProcessor:
             ssl_feats = feats
 
         # GPU K-means: use cached centroids tensor for fast argmin
-        if hasattr(self, '_km_centroids') and self._km_centroids is not None:
+        if hasattr(self, "_km_centroids") and self._km_centroids is not None:
             feats_2d = ssl_feats[0]  # [T, feat_dim], on GPU
             distances = torch.cdist(
                 feats_2d.unsqueeze(0),
@@ -265,6 +272,7 @@ class _OpusLMDialogueAudioInputProcessor:
 # Multimodal processing for dialogue format
 # ---------------------------------------------------------------------------
 
+
 class _OpusLMDialogueProcessor:
     """Minimal processor for OpusLM Dialogue."""
 
@@ -276,7 +284,6 @@ class _OpusLMDialogueProcessor:
 
 
 class OpusLMDialogueProcessingInfo(BaseProcessingInfo):
-
     def get_hf_config(self) -> OpusLMDialogueConfig:
         return self.ctx.get_hf_config(OpusLMDialogueConfig)
 
@@ -301,7 +308,6 @@ class OpusLMDialogueProcessingInfo(BaseProcessingInfo):
 
 
 class OpusLMDialogueMultiModalDataParser(MultiModalDataParser):
-
     def _parse_audio_data(
         self,
         data: dict[str, torch.Tensor] | ModalityData[AudioItem],
@@ -312,7 +318,6 @@ class OpusLMDialogueMultiModalDataParser(MultiModalDataParser):
 class OpusLMDialogueDummyInputsBuilder(
     BaseDummyInputsBuilder[OpusLMDialogueProcessingInfo]
 ):
-
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_audios = mm_counts.get("audio", 0)
         return "<codec_ssl_start_end>" * num_audios
@@ -473,16 +478,20 @@ class OpusLMDialogueMultiModalProcessor(
                     if isinstance(content, list):
                         new_parts = []
                         for part in content:
-                            if (isinstance(part, dict)
-                                    and part.get("type") == "input_audio"
-                                    and pt_idx < len(pre_tokens)):
+                            if (
+                                isinstance(part, dict)
+                                and part.get("type") == "input_audio"
+                                and pt_idx < len(pre_tokens)
+                            ):
                                 pt = pre_tokens[pt_idx]
                                 pt_idx += 1
-                                new_parts.append({
-                                    "type": "input_tokens",
-                                    "stream0": pt.get("stream0", []),
-                                    "streams18": pt.get("streams18", []),
-                                })
+                                new_parts.append(
+                                    {
+                                        "type": "input_tokens",
+                                        "stream0": pt.get("stream0", []),
+                                        "streams18": pt.get("streams18", []),
+                                    }
+                                )
                             else:
                                 new_parts.append(part)
                         rebuilt.append({"role": role, "content": new_parts})
@@ -493,9 +502,7 @@ class OpusLMDialogueMultiModalProcessor(
         # If no structured messages, fall back to simple tokenization
         if not messages or not isinstance(messages, (list, tuple)):
             text_inputs = tokenizer(prompt, return_tensors="pt")
-            return self._build_simple_sequence(
-                text_inputs, cfg, task_token_id, audios
-            )
+            return self._build_simple_sequence(text_inputs, cfg, task_token_id, audios)
 
         # Build the full dialogue sequence from messages
         mode = mode_obj if isinstance(mode_obj, str) else None
@@ -515,10 +522,7 @@ class OpusLMDialogueMultiModalProcessor(
         if not isinstance(input_ids, torch.Tensor):
             return text_inputs
 
-        if input_ids.ndim == 2:
-            body_ids = input_ids[0].tolist()
-        else:
-            body_ids = input_ids.tolist()
+        body_ids = input_ids[0].tolist() if input_ids.ndim == 2 else input_ids.tolist()
 
         sos = int(cfg.sos_eos_token_id)
         seq = [sos, int(task_token_id)]
@@ -546,11 +550,7 @@ class OpusLMDialogueMultiModalProcessor(
         raw_audio_sample_counts = []
 
         for audio in audios:
-            audio_np = (
-                audio
-                if isinstance(audio, np.ndarray)
-                else np.array(audio)
-            )
+            audio_np = audio if isinstance(audio, np.ndarray) else np.array(audio)
             if audio_np.ndim != 1:
                 audio_np = audio_np.reshape(-1)
             if audio_np.dtype != np.float32:
@@ -569,9 +569,7 @@ class OpusLMDialogueMultiModalProcessor(
                 stream18_chunks.append(
                     torch.zeros(T, cfg.num_codec_streams, dtype=torch.long)
                 )
-                raw_audio_chunks.append(
-                    torch.from_numpy(audio_np).float()
-                )
+                raw_audio_chunks.append(torch.from_numpy(audio_np).float())
                 raw_audio_sample_counts.append(N_samples)
 
         if stream0_chunks:
@@ -579,24 +577,18 @@ class OpusLMDialogueMultiModalProcessor(
             stream18_tensor = torch.cat(stream18_chunks, dim=0).long()
         else:
             stream0_tensor = torch.empty((0,), dtype=torch.long)
-            stream18_tensor = torch.empty(
-                (0, cfg.num_codec_streams), dtype=torch.long
-            )
+            stream18_tensor = torch.empty((0, cfg.num_codec_streams), dtype=torch.long)
 
         data = {
             **text_inputs,
             "audio_stream0_ids": stream0_tensor,
             "audio_streams18": stream18_tensor,
             "audio_lengths": torch.tensor(lengths, dtype=torch.long),
-            "audio_is_system": torch.zeros(
-                len(lengths), dtype=torch.bool
-            ),
+            "audio_is_system": torch.zeros(len(lengths), dtype=torch.bool),
         }
 
         if raw_audio_chunks:
-            data["input_audio_features"] = torch.cat(
-                raw_audio_chunks, dim=0
-            )
+            data["input_audio_features"] = torch.cat(raw_audio_chunks, dim=0)
             data["audio_feature_lengths"] = torch.tensor(
                 raw_audio_sample_counts, dtype=torch.long
             )
@@ -643,7 +635,7 @@ class OpusLMDialogueMultiModalProcessor(
         seq: list[int] = [sos, int(task_token_id)]
 
         # Check if tokenizer already shifts IDs to global range.
-        _needs_text_shift = not hasattr(tokenizer, 'text_token_offset')
+        _needs_text_shift = not hasattr(tokenizer, "text_token_offset")
         _text_offset = int(cfg.text_token_start) if _needs_text_shift else 0
 
         stream0_chunks: list[torch.Tensor] = []
@@ -666,7 +658,7 @@ class OpusLMDialogueMultiModalProcessor(
         for msg_idx, msg in enumerate(messages):
             role = msg.get("role", "user")
             content = msg.get("content", "")
-            is_last = (msg_idx == len(messages) - 1)
+            is_last = msg_idx == len(messages) - 1
 
             role_token = role_token_map.get(role, cfg.user_input_token_id)
 
@@ -729,9 +721,7 @@ class OpusLMDialogueMultiModalProcessor(
 
                         seq.append(role_token)
                         seq.append(cfg.text_bpe_start_end_token_id)
-                        text_ids = tokenizer.encode(
-                            text_val, add_special_tokens=False
-                        )
+                        text_ids = tokenizer.encode(text_val, add_special_tokens=False)
                         text_offset = cfg.text_token_start
                         seq.extend(tid + text_offset for tid in text_ids)
                         # Non-target: no end token. Add inter-segment padding.
@@ -749,41 +739,31 @@ class OpusLMDialogueMultiModalProcessor(
                         if s18_list and isinstance(s18_list[0], list):
                             streams18 = np.array(s18_list, dtype=np.int64)
                         else:
-                            streams18 = np.zeros(
-                                (len(s0_list), 8), dtype=np.int64
-                            )
+                            streams18 = np.zeros((len(s0_list), 8), dtype=np.int64)
                         T = len(stream0)
                         if T == 0:
                             continue
 
-                        is_system = (role == "system")
+                        is_system = role == "system"
                         seq.append(role_token)
 
                         if is_system:
                             seq.append(cfg.spk_start_end_token_id)
                             spk_len = cfg.speaker_prompt_length
-                            if T >= spk_len:
+                            if spk_len <= T:
                                 stream0 = stream0[:spk_len]
                                 streams18 = streams18[:spk_len]
                             else:
                                 # Pad with 0 (pad token) to match ESPnet
                                 # training format (NOT stream0[0]).
-                                pad_s0 = np.zeros(
-                                    spk_len - T, dtype=np.int64
-                                )
-                                pad_s18 = np.zeros(
-                                    (spk_len - T, 8), dtype=np.int64
-                                )
+                                pad_s0 = np.zeros(spk_len - T, dtype=np.int64)
+                                pad_s18 = np.zeros((spk_len - T, 8), dtype=np.int64)
                                 stream0 = np.concatenate([stream0, pad_s0])
-                                streams18 = np.concatenate(
-                                    [streams18, pad_s18]
-                                )
+                                streams18 = np.concatenate([streams18, pad_s18])
                             T = spk_len
 
                         pad_s0 = np.zeros(inter_pad, dtype=np.int64)
-                        pad_s18 = np.zeros(
-                            (inter_pad, 8), dtype=np.int64
-                        )
+                        pad_s18 = np.zeros((inter_pad, 8), dtype=np.int64)
                         stream0 = np.concatenate([stream0, pad_s0])
                         streams18 = np.concatenate([streams18, pad_s18])
                         T += inter_pad
@@ -792,18 +772,15 @@ class OpusLMDialogueMultiModalProcessor(
 
                         lengths.append(T)
                         audio_is_system.append(is_system)
-                        stream0_chunks.append(
-                            torch.from_numpy(stream0).long()
-                        )
-                        stream18_chunks.append(
-                            torch.from_numpy(streams18).long()
-                        )
+                        stream0_chunks.append(torch.from_numpy(stream0).long())
+                        stream18_chunks.append(torch.from_numpy(streams18).long())
 
                     elif part_type == "input_audio":
                         if audio_idx >= len(audios):
                             logger.warning(
                                 "Audio index %d exceeds available audios (%d)",
-                                audio_idx, len(audios),
+                                audio_idx,
+                                len(audios),
                             )
                             continue
 
@@ -821,15 +798,11 @@ class OpusLMDialogueMultiModalProcessor(
                         if audio_np.dtype != np.float32:
                             audio_np = audio_np.astype(np.float32)
                         N_samples = len(audio_np)
-                        T = (
-                            math.ceil(N_samples / 320)
-                            if N_samples > 0
-                            else 0
-                        )
+                        T = math.ceil(N_samples / 320) if N_samples > 0 else 0
                         if T == 0:
                             continue
 
-                        is_system = (role == "system")
+                        is_system = role == "system"
                         seq.append(role_token)
 
                         # Placeholder tokens — actual SSL+DAC encoding
@@ -846,20 +819,14 @@ class OpusLMDialogueMultiModalProcessor(
                             seq.append(cfg.spk_start_end_token_id)
                             # Pad/trim to speaker_prompt_length
                             spk_len = cfg.speaker_prompt_length
-                            if T >= spk_len:
+                            if spk_len <= T:
                                 stream0 = stream0[:spk_len]
                                 streams18 = streams18[:spk_len]
                             else:
-                                pad_s0 = np.zeros(
-                                    spk_len - T, dtype=np.int64
-                                )
-                                pad_s18 = np.zeros(
-                                    (spk_len - T, 8), dtype=np.int64
-                                )
+                                pad_s0 = np.zeros(spk_len - T, dtype=np.int64)
+                                pad_s18 = np.zeros((spk_len - T, 8), dtype=np.int64)
                                 stream0 = np.concatenate([stream0, pad_s0])
-                                streams18 = np.concatenate(
-                                    [streams18, pad_s18]
-                                )
+                                streams18 = np.concatenate([streams18, pad_s18])
                             T = spk_len
 
                         # Inter-segment padding: extend audio by nq-1 zero
@@ -880,18 +847,12 @@ class OpusLMDialogueMultiModalProcessor(
 
                         lengths.append(T)
                         audio_is_system.append(is_system)
-                        stream0_chunks.append(
-                            torch.from_numpy(stream0).long()
-                        )
-                        stream18_chunks.append(
-                            torch.from_numpy(streams18).long()
-                        )
+                        stream0_chunks.append(torch.from_numpy(stream0).long())
+                        stream18_chunks.append(torch.from_numpy(streams18).long())
 
                         # Store raw audio for encoding in
                         # embed_multimodal()
-                        raw_audio_chunks.append(
-                            torch.from_numpy(audio_np).float()
-                        )
+                        raw_audio_chunks.append(torch.from_numpy(audio_np).float())
                         raw_audio_sample_counts.append(N_samples)
 
             else:
@@ -923,18 +884,14 @@ class OpusLMDialogueMultiModalProcessor(
             "audio_stream0_ids": stream0_tensor,
             "audio_streams18": stream18_tensor,
             "audio_lengths": torch.tensor(lengths, dtype=torch.long),
-            "audio_is_system": torch.tensor(
-                audio_is_system, dtype=torch.bool
-            ),
+            "audio_is_system": torch.tensor(audio_is_system, dtype=torch.bool),
         }
 
         # Raw audio features for model-side encoding (embed_multimodal).
         # Only present when audio was provided as waveforms (input_audio),
         # NOT for pre-tokenized ARK data (input_tokens).
         if raw_audio_chunks:
-            data["input_audio_features"] = torch.cat(
-                raw_audio_chunks, dim=0
-            )
+            data["input_audio_features"] = torch.cat(raw_audio_chunks, dim=0)
             data["audio_feature_lengths"] = torch.tensor(
                 raw_audio_sample_counts, dtype=torch.long
             )
@@ -1011,9 +968,7 @@ class OpusLMDialogueMultiModalProcessor(
         # `_apply_hf_processor`, so we rewrite them on the way out.
         if "audio" in mm_info.hashes:
             new_hashes = dict(mm_info.hashes)
-            new_hashes["audio"] = [
-                str(_uuid.uuid4()) for _ in new_hashes["audio"]
-            ]
+            new_hashes["audio"] = [str(_uuid.uuid4()) for _ in new_hashes["audio"]]
             mm_info = mm_info._replace(hashes=new_hashes)
         return prompt_ids, mm_info, is_update_applied
 
@@ -1042,14 +997,10 @@ class OpusLMDialogueMultiModalProcessor(
         audio_feature_lengths = hf_inputs.get("audio_feature_lengths")
         if audio_feature_lengths is not None:
             assert isinstance(audio_feature_lengths, torch.Tensor)
-            fields["input_audio_features"] = (
-                MultiModalFieldConfig.flat_from_sizes(
-                    "audio", audio_feature_lengths, dim=0
-                )
+            fields["input_audio_features"] = MultiModalFieldConfig.flat_from_sizes(
+                "audio", audio_feature_lengths, dim=0
             )
-            fields["audio_feature_lengths"] = (
-                MultiModalFieldConfig.batched("audio")
-            )
+            fields["audio_feature_lengths"] = MultiModalFieldConfig.batched("audio")
 
         return fields
 
@@ -1062,7 +1013,7 @@ class OpusLMDialogueMultiModalProcessor(
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         cfg = self.info.get_hf_config()
 
-        audio_token = processor.audio_token
+        _audio_token = processor.audio_token
 
         out_mm_data = out_mm_kwargs.get_data()
         audio_lengths = out_mm_data.get("audio_lengths")
@@ -1075,8 +1026,8 @@ class OpusLMDialogueMultiModalProcessor(
         assert isinstance(audio_stream0_ids, torch.Tensor)
 
         offsets = [0]
-        for l in audio_lengths.tolist():
-            offsets.append(offsets[-1] + int(l))
+        for frame_length in audio_lengths.tolist():
+            offsets.append(offsets[-1] + int(frame_length))
 
         def get_replacement_audio(item_idx: int):
             start = offsets[item_idx]
@@ -1086,8 +1037,7 @@ class OpusLMDialogueMultiModalProcessor(
                 audios = mm_items.get_items("audio", AudioProcessorItems)
                 audio = audios.get(item_idx)
                 raise ValueError(
-                    f"The audio {audio} is too short to be represented "
-                    "inside the model"
+                    f"The audio {audio} is too short to be represented inside the model"
                 )
 
             stream0_ids = audio_stream0_ids[start:end].tolist()
@@ -1175,9 +1125,10 @@ class OpusLMDialogueForConditionalGeneration(
         # config.rope_parameters = {"rope_type": "default", "rope_theta": ...}
         # so no extra shim is needed.
         from transformers import LlamaConfig as HFLlamaConfig
-        from vllm.model_executor.models.llama import LlamaModel
+
         from vllm.model_executor.layers.logits_processor import LogitsProcessor
         from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+        from vllm.model_executor.models.llama import LlamaModel
 
         llama_hf_config = HFLlamaConfig(
             vocab_size=config.vocab_size,
@@ -1239,9 +1190,9 @@ class OpusLMDialogueForConditionalGeneration(
         self._dac_hf_model_tag: str = config.dac_hf_model_tag
 
         # --- Audio encoder for model-side SSL+DAC encoding (lazy-loaded) ---
-        self._audio_input_processor_model: (
-            _OpusLMDialogueAudioInputProcessor | None
-        ) = None
+        self._audio_input_processor_model: _OpusLMDialogueAudioInputProcessor | None = (
+            None
+        )
 
         # --- Marker for gpu_model_runner detection ---
         self._is_dialogue = True
@@ -1259,7 +1210,7 @@ class OpusLMDialogueForConditionalGeneration(
         # Stream 0 (SSL): allow [ssl_token_start, ssl_token_end)
         #                      + codec_ssl_start_end (34) + eos (5)
         ssl_mask = torch.ones(V, dtype=torch.bool)
-        ssl_mask[config.ssl_token_start:config.ssl_token_end] = False
+        ssl_mask[config.ssl_token_start : config.ssl_token_end] = False
         ssl_mask[config.codec_ssl_start_end_token_id] = False
         ssl_mask[config.eos_token_id] = False
         self.register_buffer("audio_mask_s0", ssl_mask)
@@ -1273,7 +1224,7 @@ class OpusLMDialogueForConditionalGeneration(
         # as the character "3".
         text_mask = torch.ones(V, dtype=torch.bool)
         text_mask[config.eos_token_id] = False
-        text_mask[config.text_token_start:config.text_token_end] = False
+        text_mask[config.text_token_start : config.text_token_end] = False
         self.register_buffer("text_mask_s0", text_mask)
 
         # Pre-audio mask: forces codec_ssl_start_end (34) output
@@ -1300,20 +1251,14 @@ class OpusLMDialogueForConditionalGeneration(
         """Lazy-load the SSL+DAC audio encoder on model device."""
         if self._audio_input_processor_model is None:
             device = next(self.model.parameters()).device
-            self._audio_input_processor_model = (
-                _OpusLMDialogueAudioInputProcessor(
-                    self.config, device=device
-                )
+            self._audio_input_processor_model = _OpusLMDialogueAudioInputProcessor(
+                self.config, device=device
             )
-            logger.info(
-                "Loaded audio encoder (SSL+DAC) on %s", device
-            )
+            logger.info("Loaded audio encoder (SSL+DAC) on %s", device)
         return self._audio_input_processor_model
 
     @torch.inference_mode()
-    def _encode_and_embed_audio(
-        self, **kwargs: object
-    ) -> tuple[torch.Tensor, ...]:
+    def _encode_and_embed_audio(self, **kwargs: object) -> tuple[torch.Tensor, ...]:
         """Encode raw audio waveforms via SSL+DAC and produce embeddings.
 
         This runs the full audio encoding pipeline (XEUS SSL → K-means
@@ -1348,11 +1293,17 @@ class OpusLMDialogueForConditionalGeneration(
         mm_embeddings: list[torch.Tensor] = []
 
         offset = 0
-        n_items = len(audio_sample_lengths.tolist()) if audio_sample_lengths.dim() > 0 else 1
-        sample_lens = audio_sample_lengths.tolist() if audio_sample_lengths.dim() > 0 else [int(audio_sample_lengths)]
+        _n_items = (
+            len(audio_sample_lengths.tolist()) if audio_sample_lengths.dim() > 0 else 1
+        )
+        sample_lens = (
+            audio_sample_lengths.tolist()
+            if audio_sample_lengths.dim() > 0
+            else [int(audio_sample_lengths)]
+        )
         for i, n_samples in enumerate(sample_lens):
             n_samples = int(n_samples)
-            audio_np = raw_audio[offset:offset + n_samples].cpu().numpy()
+            audio_np = raw_audio[offset : offset + n_samples].cpu().numpy()
             offset += n_samples
 
             if audio_np.dtype != np.float32:
@@ -1361,18 +1312,21 @@ class OpusLMDialogueForConditionalGeneration(
             # Encode via SSL + DAC (runs on GPU)
             try:
                 stream0, streams18 = encoder.encode_audio_tokens(audio_np)
-                torch.cuda.synchronize()
+                torch.accelerator.synchronize()
             except Exception as e:
                 logger.error(
-                    "encode_audio_tokens failed for item %d "
-                    "(n_samples=%d): %s", i, n_samples, e,
+                    "encode_audio_tokens failed for item %d (n_samples=%d): %s",
+                    i,
+                    n_samples,
+                    e,
                 )
                 raise
             T_enc = len(stream0)
 
-            is_sys = (
-                audio_is_system is not None
-                and (bool(audio_is_system[i]) if hasattr(audio_is_system, '__getitem__') else bool(audio_is_system))
+            is_sys = audio_is_system is not None and (
+                bool(audio_is_system[i])
+                if hasattr(audio_is_system, "__getitem__")
+                else bool(audio_is_system)
             )
 
             if is_sys:
@@ -1383,9 +1337,7 @@ class OpusLMDialogueForConditionalGeneration(
                     streams18 = streams18[:spk_len]
                 else:
                     pad_s0 = np.zeros(spk_len - T_enc, dtype=np.int64)
-                    pad_s18 = np.zeros(
-                        (spk_len - T_enc, 8), dtype=np.int64
-                    )
+                    pad_s18 = np.zeros((spk_len - T_enc, 8), dtype=np.int64)
                     stream0 = np.concatenate([stream0, pad_s0])
                     streams18 = np.concatenate([streams18, pad_s18])
                 T_audio = spk_len
@@ -1402,7 +1354,10 @@ class OpusLMDialogueForConditionalGeneration(
             # Adjust to match expected embed length from preprocessor
             # (ceil may differ from actual encoder output by ±1 frame)
             if embed_lengths is not None:
-                if hasattr(embed_lengths, '__getitem__') and (not isinstance(embed_lengths, torch.Tensor) or embed_lengths.dim() > 0):
+                if hasattr(embed_lengths, "__getitem__") and (
+                    not isinstance(embed_lengths, torch.Tensor)
+                    or embed_lengths.dim() > 0
+                ):
                     expected = int(embed_lengths[i])
                 else:
                     expected = int(embed_lengths)
@@ -1411,19 +1366,18 @@ class OpusLMDialogueForConditionalGeneration(
             if T_total != expected:
                 logger.debug(
                     "Audio item %d: T_total=%d != expected=%d, adjusting",
-                    i, T_total, expected,
+                    i,
+                    T_total,
+                    expected,
                 )
                 if T_total > expected:
                     stream0 = stream0[:expected]
                     streams18 = streams18[:expected]
                 else:
                     extra = expected - T_total
-                    stream0 = np.concatenate(
-                        [stream0, np.zeros(extra, dtype=np.int64)]
-                    )
+                    stream0 = np.concatenate([stream0, np.zeros(extra, dtype=np.int64)])
                     streams18 = np.concatenate(
-                        [streams18,
-                         np.zeros((extra, 8), dtype=np.int64)]
+                        [streams18, np.zeros((extra, 8), dtype=np.int64)]
                     )
                 T_total = expected
 
@@ -1434,7 +1388,13 @@ class OpusLMDialogueForConditionalGeneration(
                 logger.error(
                     "Token OOB! item=%d s0_max=%d s18_max=%d V=%d "
                     "T_total=%d is_sys=%s n_samples=%d",
-                    i, s0_max, s18_max, V, T_total, is_sys, n_samples,
+                    i,
+                    s0_max,
+                    s18_max,
+                    V,
+                    T_total,
+                    is_sys,
+                    n_samples,
                 )
 
             # Convert to tensors and delay-interleave
@@ -1449,21 +1409,27 @@ class OpusLMDialogueForConditionalGeneration(
             for k in range(s18.shape[1]):
                 delay = k + 1
                 if delay < T_total:
-                    delayed_s18[delay:, k] = s18[:T_total - delay, k]
+                    delayed_s18[delay:, k] = s18[: T_total - delay, k]
 
             # Embed and sum all 9 streams
             try:
                 s0_embed = embed_fn(s0)
-                torch.cuda.synchronize()
+                torch.accelerator.synchronize()
                 s18_embed = embed_fn(delayed_s18)
-                torch.cuda.synchronize()
+                torch.accelerator.synchronize()
             except Exception as e:
                 logger.error(
                     "embed_fn failed for item %d: s0 range=[%d,%d] "
                     "s18 range=[%d,%d] V=%d shape_s0=%s shape_s18=%s: %s",
-                    i, int(s0.min()), int(s0.max()),
-                    int(delayed_s18.min()), int(delayed_s18.max()),
-                    V, s0.shape, delayed_s18.shape, e,
+                    i,
+                    int(s0.min()),
+                    int(s0.max()),
+                    int(delayed_s18.min()),
+                    int(delayed_s18.max()),
+                    V,
+                    s0.shape,
+                    delayed_s18.shape,
+                    e,
                 )
                 raise
             combined = s0_embed + s18_embed.sum(dim=1)
@@ -1471,8 +1437,13 @@ class OpusLMDialogueForConditionalGeneration(
             logger.debug(
                 "encode_embed item %d/%d: n_samples=%d T_enc=%d "
                 "is_sys=%s expected=%d actual=%d",
-                i, len(sample_lens), n_samples, T_enc,
-                is_sys, expected, combined.shape[0],
+                i,
+                len(sample_lens),
+                n_samples,
+                T_enc,
+                is_sys,
+                expected,
+                combined.shape[0],
             )
 
         logger.debug(
@@ -1554,8 +1525,8 @@ class OpusLMDialogueForConditionalGeneration(
                 )
                 continue
 
-            s0 = stream0_ids[offset:offset + length]
-            s18 = streams18[offset:offset + length]
+            s0 = stream0_ids[offset : offset + length]
+            s18 = streams18[offset : offset + length]
             offset += length
 
             # Apply delay interleaving to streams 1-8:
@@ -1566,7 +1537,7 @@ class OpusLMDialogueForConditionalGeneration(
             for k in range(s18.shape[1]):
                 delay = k + 1
                 if delay < length:
-                    delayed_s18[delay:, k] = s18[:length - delay, k]
+                    delayed_s18[delay:, k] = s18[: length - delay, k]
 
             s0_embed = embed_fn(s0)
             s18_embed = embed_fn(delayed_s18)
@@ -1574,7 +1545,6 @@ class OpusLMDialogueForConditionalGeneration(
             # emb(pad=0) is a learned embedding that contributes to the sum
             # at every position. Zeroing it creates a systematic bias.
             mm_embeddings.append(s0_embed + s18_embed.sum(dim=1))
-
 
         return tuple(mm_embeddings)
 
@@ -1601,7 +1571,7 @@ class OpusLMDialogueForConditionalGeneration(
           - This method: adds (nq-1)*emb(0) pad bias to text positions
             where streams 1-8 are implicitly all pad
         """
-        N = input_ids.shape[0]
+        _num_tokens = input_ids.shape[0]
 
         # NOTE(v0.28.0): `handle_oov_mm_token` was removed from the
         # SupportsMultiModal interface; OOV handling is now keyed off
@@ -1614,7 +1584,8 @@ class OpusLMDialogueForConditionalGeneration(
 
         # Track which positions have real stream embeddings injected
         has_real_streams = torch.zeros(
-            inputs_embeds.shape[0], dtype=torch.bool,
+            inputs_embeds.shape[0],
+            dtype=torch.bool,
             device=inputs_embeds.device,
         )
 
@@ -1628,9 +1599,7 @@ class OpusLMDialogueForConditionalGeneration(
 
             # Validate shapes before merge
             num_mm_positions = int(is_multimodal.sum().item())
-            total_mm_tokens = sum(
-                e.shape[0] for e in multimodal_embeddings
-            )
+            total_mm_tokens = sum(e.shape[0] for e in multimodal_embeddings)
             if num_mm_positions != total_mm_tokens:
                 logger.error(
                     "SHAPE MISMATCH in embed_input_ids: "
@@ -1673,18 +1642,14 @@ class OpusLMDialogueForConditionalGeneration(
         # its generated audio tokens lose stream 1-8 embeddings (they
         # only get emb(s0) instead of emb(s0)+...+emb(s8)).  We fix
         # this by replaying the stored stream history at those positions.
-        replay_info = getattr(self, '_prefill_stream_replay', None)
+        replay_info = getattr(self, "_prefill_stream_replay", None)
         if replay_info:
             embed_fn = self.model.embed_tokens
             for abs_pos, hist_entry in replay_info.items():
                 if abs_pos < inputs_embeds.shape[0]:
-                    stream_embeds = embed_fn(
-                        hist_entry.unsqueeze(0)
-                    )  # (1, 8, hidden)
+                    stream_embeds = embed_fn(hist_entry.unsqueeze(0))  # (1, 8, hidden)
                     stream_sum = stream_embeds.sum(dim=1).squeeze(0)  # (H,)
-                    inputs_embeds[abs_pos] = (
-                        inputs_embeds[abs_pos] + stream_sum
-                    )
+                    inputs_embeds[abs_pos] = inputs_embeds[abs_pos] + stream_sum
                     has_real_streams[abs_pos] = True
             self._prefill_stream_replay = {}
 
@@ -1696,14 +1661,11 @@ class OpusLMDialogueForConditionalGeneration(
         if text_positions.any():
             embed_fn = self.model.embed_tokens
             pad_embed = embed_fn(
-                torch.zeros(1, dtype=torch.long,
-                            device=inputs_embeds.device)
+                torch.zeros(1, dtype=torch.long, device=inputs_embeds.device)
             )  # (1, hidden)
             nq_minus_1 = self.config.nq - 1  # 8
             inputs_embeds = inputs_embeds + (
-                text_positions.float().unsqueeze(-1)
-                * pad_embed
-                * nq_minus_1
+                text_positions.float().unsqueeze(-1) * pad_embed * nq_minus_1
             )
 
         return inputs_embeds
@@ -1716,7 +1678,7 @@ class OpusLMDialogueForConditionalGeneration(
         so that token_req_map[token_idx] gives the correct request ID.
         """
         batch_rids = self._current_batch_req_ids
-        tokens_per_req = getattr(self, '_tokens_per_req', None)
+        tokens_per_req = getattr(self, "_tokens_per_req", None)
         if not batch_rids or not tokens_per_req:
             return None
         if len(batch_rids) != len(tokens_per_req):
@@ -1735,13 +1697,11 @@ class OpusLMDialogueForConditionalGeneration(
         """
         positions = torch.zeros_like(input_ids, dtype=torch.bool)
         batch_rids = self._current_batch_req_ids
-        tokens_per_req = getattr(self, '_tokens_per_req', None)
+        tokens_per_req = getattr(self, "_tokens_per_req", None)
         if batch_rids and tokens_per_req and len(batch_rids) == len(tokens_per_req):
             cfg = self.config
             tok_off = 0
-            for ri, (req_id, ntok) in enumerate(
-                zip(batch_rids, tokens_per_req)
-            ):
+            for ri, (req_id, ntok) in enumerate(zip(batch_rids, tokens_per_req)):
                 end = tok_off + ntok
                 if end > positions.numel():
                     break
@@ -1760,9 +1720,8 @@ class OpusLMDialogueForConditionalGeneration(
                     # Prefill/re-prefill: only mark tokens in SSL range
                     # (audio tokens), NOT text prompt tokens
                     chunk = input_ids[tok_off:end]
-                    ssl_mask = (
-                        (chunk >= cfg.ssl_token_start)
-                        & (chunk < cfg.ssl_token_end)
+                    ssl_mask = (chunk >= cfg.ssl_token_start) & (
+                        chunk < cfg.ssl_token_end
                     )
                     positions[tok_off:end] = ssl_mask
                 tok_off = end
@@ -1781,10 +1740,7 @@ class OpusLMDialogueForConditionalGeneration(
             return positions
 
         cfg = self.config
-        return (
-            (input_ids >= cfg.ssl_token_start)
-            & (input_ids < cfg.ssl_token_end)
-        )
+        return (input_ids >= cfg.ssl_token_start) & (input_ids < cfg.ssl_token_end)
 
     def _apply_stream_embeddings(
         self,
@@ -1807,7 +1763,7 @@ class OpusLMDialogueForConditionalGeneration(
 
         embed_fn = self.model.embed_tokens
         batch_rids = self._current_batch_req_ids
-        tokens_per_req = getattr(self, '_tokens_per_req', None)
+        tokens_per_req = getattr(self, "_tokens_per_req", None)
 
         # Build set of token offsets that are decode positions (ntok==1)
         decode_offsets: dict[int, str] = {}  # tok_offset → req_id
@@ -1925,17 +1881,12 @@ class OpusLMDialogueForConditionalGeneration(
         h0 = hidden_states + self.head_emb.weight[0].unsqueeze(0)
 
         if num_sample > 0:
-            sample_idx = torch.tensor(
-                sample_positions, device=dev, dtype=torch.long
-            )
+            sample_idx = torch.tensor(sample_positions, device=dev, dtype=torch.long)
             audio_hidden = hidden_states[sample_idx]
-            all_stream_biased = (
-                audio_hidden.unsqueeze(1)
-                + self.head_emb.weight[1:cfg.nq].unsqueeze(0)
-            )
-            all_stream_flat = all_stream_biased.reshape(
-                -1, hidden_states.shape[-1]
-            )
+            all_stream_biased = audio_hidden.unsqueeze(1) + self.head_emb.weight[
+                1 : cfg.nq
+            ].unsqueeze(0)
+            all_stream_flat = all_stream_biased.reshape(-1, hidden_states.shape[-1])
             combined_h = torch.cat([h0, all_stream_flat], dim=0)
         else:
             combined_h = h0
@@ -1949,9 +1900,7 @@ class OpusLMDialogueForConditionalGeneration(
 
         if num_sample > 0:
             extra_logits = combined_logits[N:]
-            all_stream_logits = extra_logits.reshape(
-                num_sample, num_extra_streams, V
-            )
+            all_stream_logits = extra_logits.reshape(num_sample, num_extra_streams, V)
         else:
             all_stream_logits = None
 
@@ -1969,9 +1918,7 @@ class OpusLMDialogueForConditionalGeneration(
                 if text_step < max(text_minlen, 0):
                     eos_suppress_text.append(pos)
             if eos_suppress_text:
-                eos_idx = torch.tensor(
-                    eos_suppress_text, device=dev, dtype=torch.long
-                )
+                eos_idx = torch.tensor(eos_suppress_text, device=dev, dtype=torch.long)
                 stream0_logits[eos_idx, cfg.eos_token_id] = float("-inf")
 
         if audio_positions:
@@ -2001,9 +1948,7 @@ class OpusLMDialogueForConditionalGeneration(
                 if top_k > 0 and top_k < cfg.vocab_size:
                     topk_groups.setdefault(top_k, []).append(pos)
             for top_k, positions_list in topk_groups.items():
-                tk_idx = torch.tensor(
-                    positions_list, device=dev, dtype=torch.long
-                )
+                tk_idx = torch.tensor(positions_list, device=dev, dtype=torch.long)
                 rows = stream0_logits[tk_idx]
                 topk_vals, topk_indices = torch.topk(rows, top_k, dim=-1)
                 rows_new = torch.full_like(rows, float("-inf"))
@@ -2011,23 +1956,17 @@ class OpusLMDialogueForConditionalGeneration(
                 stream0_logits[tk_idx] = rows_new
 
         if pre_audio_positions:
-            idx = torch.tensor(
-                pre_audio_positions, device=dev, dtype=torch.long
-            )
+            idx = torch.tensor(pre_audio_positions, device=dev, dtype=torch.long)
             stream0_logits[idx] = float("-inf")
             stream0_logits[idx, cfg.codec_ssl_start_end_token_id] = 0.0
 
         if audio_flush_positions:
-            idx = torch.tensor(
-                audio_flush_positions, device=dev, dtype=torch.long
-            )
+            idx = torch.tensor(audio_flush_positions, device=dev, dtype=torch.long)
             stream0_logits[idx] = float("-inf")
             stream0_logits[idx, 0] = 0.0
 
         if audio_stop_positions:
-            idx = torch.tensor(
-                audio_stop_positions, device=dev, dtype=torch.long
-            )
+            idx = torch.tensor(audio_stop_positions, device=dev, dtype=torch.long)
             stream0_logits[idx] = float("-inf")
             stream0_logits[idx, cfg.eos_token_id] = 0.0
 
@@ -2079,13 +2018,10 @@ class OpusLMDialogueForConditionalGeneration(
                 row_flush_step[i] = int(rc.get("flush_step", 0))
 
         # Pre-compute sampling groups (batched by temperature/top_k)
-        sampling_groups = self._get_audio_sampling_groups(
-            sampled_positions, device
-        )
+        sampling_groups = self._get_audio_sampling_groups(sampled_positions, device)
 
         new_buffer = torch.zeros(
-            num_audio, cfg.num_codec_streams,
-            dtype=torch.long, device=device
+            num_audio, cfg.num_codec_streams, dtype=torch.long, device=device
         )
 
         # Use pre-computed logits if available, otherwise compute here
@@ -2093,24 +2029,17 @@ class OpusLMDialogueForConditionalGeneration(
             all_logits = precomputed_stream_logits
         else:
             num_extra_streams = cfg.nq - 1
-            audio_idx = torch.tensor(
-                sampled_positions, device=device, dtype=torch.long
-            )
+            audio_idx = torch.tensor(sampled_positions, device=device, dtype=torch.long)
             audio_hidden = hidden_states[audio_idx]
-            all_biased = (
-                audio_hidden.unsqueeze(1)
-                + self.head_emb.weight[1:cfg.nq].unsqueeze(0)
-            )
+            all_biased = audio_hidden.unsqueeze(1) + self.head_emb.weight[
+                1 : cfg.nq
+            ].unsqueeze(0)
             all_biased_flat = all_biased.reshape(-1, audio_hidden.shape[-1])
-            all_logits_flat = self.logits_processor(
-                self.lm_head, all_biased_flat
-            )
+            all_logits_flat = self.logits_processor(self.lm_head, all_biased_flat)
             if all_logits_flat is None:
                 return
             V = all_logits_flat.shape[-1]
-            all_logits = all_logits_flat.reshape(
-                num_audio, num_extra_streams, V
-            )
+            all_logits = all_logits_flat.reshape(num_audio, num_extra_streams, V)
 
         for s in range(1, cfg.nq):
             s_idx = s - 1
@@ -2144,9 +2073,7 @@ class OpusLMDialogueForConditionalGeneration(
                 req_id = batch_rids[pos]
                 buf_vec = new_buffer[j]
                 self._stream_buffer_dict[req_id] = buf_vec.clone()
-                self._stream18_history.setdefault(req_id, []).append(
-                    buf_vec.clone()
-                )
+                self._stream18_history.setdefault(req_id, []).append(buf_vec.clone())
 
     def _get_audio_sampling_groups(
         self,
@@ -2219,14 +2146,13 @@ class OpusLMDialogueForConditionalGeneration(
         if self._dac_model is None:
             try:
                 from espnet2.bin.gan_codec_inference import AudioCoding
+
                 self._dac_model = AudioCoding.from_pretrained(
                     self._dac_hf_model_tag
                 ).model.eval()
                 device = next(self.model.parameters()).device
                 self._dac_model = self._dac_model.to(device)
-                logger.info(
-                    "Loaded DAC model from %s", self._dac_hf_model_tag
-                )
+                logger.info("Loaded DAC model from %s", self._dac_hf_model_tag)
             except Exception as e:
                 logger.error("Failed to load DAC model: %s", e)
                 raise
@@ -2248,7 +2174,7 @@ class OpusLMDialogueForConditionalGeneration(
 
         new_codes = []
         for n in range(N):
-            new_codes.append(codes[:, n:n + T_original, n])
+            new_codes.append(codes[:, n : n + T_original, n])
         return torch.stack(new_codes, dim=-1)
 
     def _global_to_dac_codebook(self, dac_tokens: torch.Tensor) -> torch.Tensor:
@@ -2272,17 +2198,16 @@ class OpusLMDialogueForConditionalGeneration(
         self, req_id: str, stream0_tokens: list[int]
     ) -> str | None:
         """Decode stream 0 SSL tokens + stream 1-8 DAC history to base64 WAV."""
-        import base64
         import io
         import wave
+
+        import pybase64 as base64
 
         if not stream0_tokens:
             return None
 
         try:
-            audio_np, sr = self.decode_audio_from_tokens(
-                req_id, stream0_tokens
-            )
+            audio_np, sr = self.decode_audio_from_tokens(req_id, stream0_tokens)
             if len(audio_np) == 0:
                 return None
 
@@ -2296,9 +2221,7 @@ class OpusLMDialogueForConditionalGeneration(
                 wf.writeframes(audio_int16.tobytes())
             return base64.b64encode(buf.getvalue()).decode("ascii")
         except Exception:
-            logger.exception(
-                "Failed to decode audio for request %s", req_id
-            )
+            logger.exception("Failed to decode audio for request %s", req_id)
             return None
 
     def decode_audio_from_tokens(
@@ -2328,13 +2251,9 @@ class OpusLMDialogueForConditionalGeneration(
 
         if H == 0:
             # No DAC history at all — just build a minimal matrix
-            s0 = torch.tensor(
-                stream0_ssl_tokens, dtype=torch.long, device=device
-            )
+            s0 = torch.tensor(stream0_ssl_tokens, dtype=torch.long, device=device)
             s18 = torch.zeros(N_ssl, 8, dtype=torch.long, device=device)
-            full_matrix = torch.cat(
-                [s0.unsqueeze(1), s18], dim=1
-            ).unsqueeze(0)
+            full_matrix = torch.cat([s0.unsqueeze(1), s18], dim=1).unsqueeze(0)
         else:
             # Use the FULL stream18 history (including EOS step + flush).
             # Pad stream0 with zeros to match the total length.
@@ -2364,7 +2283,6 @@ class OpusLMDialogueForConditionalGeneration(
         n_frames = min(aligned.shape[1], N_ssl)
         aligned = aligned[:, :n_frames, :]
 
-
         dac_tokens = aligned[:, :, 1:]
         dac_cb = self._global_to_dac_codebook(dac_tokens)
 
@@ -2374,9 +2292,7 @@ class OpusLMDialogueForConditionalGeneration(
     # ------------------------------------------------------------------
     # Weight loading
     # ------------------------------------------------------------------
-    def load_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights from safetensors.
 
         Expected weight names (after examples/espnet/convert/
@@ -2434,16 +2350,7 @@ class OpusLMDialogueForConditionalGeneration(
                     weight_loader(param, loaded_weight)
                     loaded_params.add(name)
 
-            elif name == "lm_head.weight":
-                if name in params_dict:
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-                    loaded_params.add(name)
-
-            elif name == "head_emb.weight":
+            elif name == "lm_head.weight" or name == "head_emb.weight":
                 if name in params_dict:
                     param = params_dict[name]
                     weight_loader = getattr(
